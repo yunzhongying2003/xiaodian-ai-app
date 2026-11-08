@@ -1,14 +1,8 @@
 package com.xiaodian.ai
 
-// Boss-only menu API (App step 3). Kitchen mode never calls this:
-// ModePolicy in MainActivity keeps menu editing boss-only.
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+// Boss-only menu API: list / add / update / delete / AI generate, plus usage.
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 data class MenuItem(
     val id: String, val name: String, val price: String,
@@ -16,77 +10,79 @@ data class MenuItem(
 )
 
 data class Usage(
-    val ordersTotal: Int, val ordersByStatus: String,
-    val completedAmount: Double, val menuTotal: Int, val menuAvailable: Int,
+    val ordersTotal: Int,
+    val ordersByStatus: Map<String, Int>,
+    val completedAmount: Double,
+    val menuTotal: Int,
+    val menuAvailable: Int,
 )
 
-class MenuRepository(private val baseUrl: String, private val auth: AppAuth = AppAuth()) {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
-
-    private fun url(path: String) = baseUrl.trimEnd('/') + path
-
-    private fun post(path: String, json: JSONObject): JSONObject {
-        val req = Request.Builder().url(url(path)).withAuth(auth, write = true)
-            .post(json.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-        client.newCall(req).execute().use { resp ->
-            val body = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) throw IllegalStateException("$path 失败: ${resp.code} $body")
-            return JSONObject(body)
-        }
-    }
-
-    private fun get(path: String): JSONObject {
-        val req = Request.Builder().url(url(path)).withAuth(auth).build()
-        client.newCall(req).execute().use { resp ->
-            val body = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) throw IllegalStateException("$path 失败: ${resp.code} $body")
-            return JSONObject(body)
-        }
-    }
-
+object MenuRepository {
     fun fetchMenu(): List<MenuItem> {
-        val arr = get("/kf/menu/list").optJSONArray("items") ?: JSONArray()
-        return (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
-            MenuItem(o.optString("id"), o.optString("name"), o.optString("price"),
-                o.optBoolean("available"), o.optString("source"))
+        val arr = ApiClient.getJson("/kf/menu/list", "拉取菜单").optJSONArray("items") ?: JSONArray()
+        val out = mutableListOf<MenuItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out += MenuItem(
+                o.optString("id"), o.optString("name"), o.optString("price"),
+                o.optBoolean("available"), o.optString("source"),
+            )
         }
+        return out
     }
 
     fun add(name: String, price: Double, source: String = "manual") {
         val json = JSONObject().put("name", name).put("price", price).put("source", source)
-        post("/kf/menu/add", json)
+        ApiClient.postJson("/kf/menu/add", json, "添加菜品")
     }
 
     fun delete(id: String) {
-        post("/kf/menu/delete", JSONObject().put("id", id))
+        ApiClient.postJson("/kf/menu/delete", JSONObject().put("id", id), "删除菜品")
     }
 
     fun update(id: String, price: Double? = null, available: Boolean? = null) {
         val json = JSONObject().put("id", id)
         if (price != null) json.put("price", price)
         if (available != null) json.put("available", available)
-        post("/kf/menu/update", json)
+        ApiClient.postJson("/kf/menu/update", json, "修改菜品")
     }
 
     fun generate(description: String): List<MenuItem> {
         val json = JSONObject().put("description", description)
-        val arr = post("/kf/menu/generate", json).optJSONArray("drafts") ?: JSONArray()
-        return (0 until arr.length()).map { i ->
-            val o = arr.getJSONObject(i)
-            MenuItem("", o.optString("name"), o.optDouble("price").toString(), true, "ai")
+        val arr = ApiClient.postJson("/kf/menu/generate", json, "AI 生成菜单").optJSONArray("drafts") ?: JSONArray()
+        val out = mutableListOf<MenuItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val p = o.optDouble("price")
+            out += MenuItem("", o.optString("name"), if (p.isNaN()) "" else formatPrice(p), true, "ai")
         }
+        return out
     }
 
     fun fetchUsage(): Usage {
-        val o = get("/kf/usage")
+        val o = ApiClient.getJson("/kf/usage", "拉取用量")
+        val byStatus = mutableMapOf<String, Int>()
+        val obj: JSONObject? = o.optJSONObject("orders_by_status")
+        if (obj != null) {
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                byStatus[k] = obj.optInt(k)
+            }
+        }
+        val amount = o.optDouble("completed_amount")
         return Usage(
-            o.optInt("orders_total"), o.optJSONObject("orders_by_status")?.toString() ?: "{}",
-            o.optDouble("completed_amount"), o.optInt("menu_total"), o.optInt("menu_available"),
+            ordersTotal = o.optInt("orders_total"),
+            ordersByStatus = byStatus,
+            completedAmount = if (amount.isNaN()) 0.0 else amount,
+            menuTotal = o.optInt("menu_total"),
+            menuAvailable = o.optInt("menu_available"),
         )
     }
+}
+
+/** 25.0 -> "25"，25.5 -> "25.5"，25.55 -> "25.55"。 */
+fun formatPrice(value: Double): String {
+    val s = String.format(java.util.Locale.US, "%.2f", value)
+    return s.trimEnd('0').trimEnd('.')
 }

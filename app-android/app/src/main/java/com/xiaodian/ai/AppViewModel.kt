@@ -1,0 +1,355 @@
+package com.xiaodian.ai
+
+// 页面数据全部放在这里，用 StateFlow 暴露给界面。
+// - 刷新时按 id 合并：没变的条目保留原对象，列表 key 不变，
+//   所以正在输入的回复框不会被刷新打断、也不会丢焦点。
+// - 回复草稿按 msgid 存在这里，刷新、切页都不会丢。
+// - App 在前台时每 8 秒自动刷新一次订单和待人工；也保留手动刷新。
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+    init { ApiClient.init(app) }
+
+    val settings: AppSettings = ApiClient.settings
+
+    private val _mode = MutableStateFlow(settings.mode)
+    val mode: StateFlow<AppMode> = _mode.asStateFlow()
+
+    private val _orders = MutableStateFlow<List<KitchenOrder>>(emptyList())
+    val orders: StateFlow<List<KitchenOrder>> = _orders.asStateFlow()
+
+    private val _handoffs = MutableStateFlow<List<HandoffItem>>(emptyList())
+    val handoffs: StateFlow<List<HandoffItem>> = _handoffs.asStateFlow()
+
+    private val _menu = MutableStateFlow<List<MenuItem>>(emptyList())
+    val menu: StateFlow<List<MenuItem>> = _menu.asStateFlow()
+
+    private val _drafts = MutableStateFlow<List<MenuItem>>(emptyList())
+    val drafts: StateFlow<List<MenuItem>> = _drafts.asStateFlow()
+
+    private val _usage = MutableStateFlow<Usage?>(null)
+    val usage: StateFlow<Usage?> = _usage.asStateFlow()
+
+    /** 回复草稿：msgid -> 文本。 */
+    private val _replyDrafts = MutableStateFlow<Map<String, String>>(emptyMap())
+    val replyDrafts: StateFlow<Map<String, String>> = _replyDrafts.asStateFlow()
+
+    /** 拉取失败的提示（显示在列表顶部，下一次成功后清空）。 */
+    private val _loadError = MutableStateFlow("")
+    val loadError: StateFlow<String> = _loadError.asStateFlow()
+
+    /** 一次性提示（Snackbar）。 */
+    private val _message = MutableStateFlow("")
+    val message: StateFlow<String> = _message.asStateFlow()
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    /** 正在提交的条目 id，按钮显示为不可点，防止连点。 */
+    private val _busy = MutableStateFlow<Set<String>>(emptySet())
+    val busy: StateFlow<Set<String>> = _busy.asStateFlow()
+
+    private var autoJob: Job? = null
+
+    fun consumeMessage() { _message.value = "" }
+    private fun toast(text: String) { _message.value = text }
+
+    fun setMode(m: AppMode) {
+        settings.mode = m
+        _mode.value = m
+        refreshAll()
+    }
+
+    fun setReplyDraft(msgid: String, text: String) {
+        _replyDrafts.value = _replyDrafts.value + (msgid to text)
+    }
+
+    // ---------- 刷新 ----------
+
+    fun startAutoRefresh() {
+        if (autoJob?.isActive == true) return
+        autoJob = viewModelScope.launch {
+            refreshAllInternal()
+            while (isActive) {
+                delay(POLL_MS)
+                refreshLive()
+            }
+        }
+    }
+
+    fun stopAutoRefresh() {
+        autoJob?.cancel()
+        autoJob = null
+    }
+
+    fun refreshAll() {
+        viewModelScope.launch { refreshAllInternal() }
+    }
+
+    private suspend fun refreshAllInternal() {
+        _refreshing.value = true
+        try {
+            refreshLive()
+            if (_mode.value == AppMode.BOSS) refreshMenu()
+        } finally {
+            _refreshing.value = false
+        }
+    }
+
+    /** 订单 + 待人工（+ 老板模式下的用量）。 */
+    private suspend fun refreshLive() {
+        val errors = mutableListOf<String>()
+        try {
+            val fresh = withContext(Dispatchers.IO) { OrderRepository.fetchOrders() }
+                .distinctBy { it.id }
+            _orders.value = mergeById(_orders.value, fresh) { it.id }
+        } catch (e: Exception) {
+            errors += (e.message ?: "拉取订单失败")
+        }
+        try {
+            val fresh = withContext(Dispatchers.IO) { HandoffRepository.fetchHandoffs() }
+                .distinctBy { it.key() }
+            _handoffs.value = mergeById(_handoffs.value, fresh) { it.key() }
+        } catch (e: Exception) {
+            errors += (e.message ?: "拉取待处理失败")
+        }
+        if (_mode.value == AppMode.BOSS) {
+            try {
+                _usage.value = withContext(Dispatchers.IO) { MenuRepository.fetchUsage() }
+            } catch (e: Exception) {
+                errors += (e.message ?: "拉取用量失败")
+            }
+        }
+        _loadError.value = errors.distinct().joinToString("\n")
+    }
+
+    private suspend fun refreshMenu() {
+        try {
+            val fresh = withContext(Dispatchers.IO) { MenuRepository.fetchMenu() }
+                .distinctBy { it.id }
+            _menu.value = mergeById(_menu.value, fresh) { it.id }
+        } catch (e: Exception) {
+            _loadError.value = e.message ?: "拉取菜单失败"
+        }
+    }
+
+    private fun <T> mergeById(old: List<T>, fresh: List<T>, id: (T) -> String): List<T> {
+        val oldById = old.associateBy(id)
+        val merged = fresh.map { n ->
+            val o = oldById[id(n)]
+            if (o != null && o == n) o else n
+        }
+        return if (merged == old) old else merged
+    }
+
+    private fun runBusy(key: String, block: suspend () -> Unit) {
+        if (key in _busy.value) return
+        _busy.value = _busy.value + key
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                toast(e.message ?: "操作失败")
+            } finally {
+                _busy.value = _busy.value - key
+            }
+        }
+    }
+
+    // ---------- 订单 ----------
+
+    /** 后厨推进状态（actor=kitchen）。 */
+    fun advanceOrder(order: KitchenOrder, next: String) {
+        runBusy("order:${order.id}") {
+            withContext(Dispatchers.IO) { OrderRepository.updateStatus(order.id, next, "kitchen") }
+            toast("取餐号 ${order.pickupNo}：${statusLabelOf(next)}")
+            refreshLive()
+        }
+    }
+
+    /** 老板确认收款：待付款 → 已下单（actor=boss）。 */
+    fun confirmPayment(order: KitchenOrder) {
+        runBusy("order:${order.id}") {
+            withContext(Dispatchers.IO) { OrderRepository.updateStatus(order.id, "ordered", "boss") }
+            toast("取餐号 ${order.pickupNo} 已确认收款，已进后厨队列")
+            refreshLive()
+        }
+    }
+
+    fun cancelOrder(order: KitchenOrder, actor: String) {
+        runBusy("order:${order.id}") {
+            withContext(Dispatchers.IO) { OrderRepository.updateStatus(order.id, "cancelled", actor) }
+            toast("取餐号 ${order.pickupNo} 已取消")
+            refreshLive()
+        }
+    }
+
+    // ---------- 待人工 ----------
+
+    fun reply(item: HandoffItem) {
+        val text = (_replyDrafts.value[item.key()] ?: "").trim()
+        if (text.isEmpty()) return
+        runBusy("handoff:${item.key()}") {
+            withContext(Dispatchers.IO) {
+                HandoffRepository.reply(item.externalUserid, text, item.msgid)
+            }
+            _replyDrafts.value = _replyDrafts.value - item.key()
+            toast("已发送给顾客")
+            refreshLive()
+        }
+    }
+
+    fun resolve(item: HandoffItem) {
+        runBusy("handoff:${item.key()}") {
+            withContext(Dispatchers.IO) { HandoffRepository.resolve(item.externalUserid, item.msgid) }
+            _replyDrafts.value = _replyDrafts.value - item.key()
+            toast("已标记处理")
+            refreshLive()
+        }
+    }
+
+    fun sendImage(item: HandoffItem, uri: Uri) {
+        runBusy("handoff:${item.key()}") {
+            val resolver = getApplication<Application>().contentResolver
+            val bytes = withContext(Dispatchers.IO) {
+                resolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw IllegalStateException("读取图片失败")
+            }
+            if (bytes.size > 2 * 1024 * 1024) {
+                toast("图片超过 2MB，微信会拒收，请换张小图")
+                return@runBusy
+            }
+            val mime = resolver.getType(uri) ?: "image/jpeg"
+            withContext(Dispatchers.IO) {
+                HandoffRepository.sendImage(item.externalUserid, bytes, "send.jpg", mime)
+            }
+            toast("图片已发送")
+        }
+    }
+
+    // ---------- 菜单 ----------
+
+    fun refreshMenuNow() {
+        viewModelScope.launch {
+            _refreshing.value = true
+            try {
+                refreshMenu()
+                try {
+                    _usage.value = withContext(Dispatchers.IO) { MenuRepository.fetchUsage() }
+                } catch (e: Exception) {
+                    _loadError.value = e.message ?: "拉取用量失败"
+                }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
+    /** 返回 null 表示校验通过并已提交；否则返回错误提示。 */
+    fun addMenuItem(name: String, priceText: String): String? {
+        if (name.isBlank()) return "菜名不能为空"
+        val price = priceText.trim().toDoubleOrNull()
+        if (price == null || price <= 0) return "价格只能填数字，如 25，不要带「元」字"
+        runBusy("menu:add") {
+            try {
+                withContext(Dispatchers.IO) { MenuRepository.add(name.trim(), price, "manual") }
+            } catch (e: Exception) {
+                throw IllegalStateException("${e.message}（重名菜品会被拒绝）")
+            }
+            toast("已添加：${name.trim()}")
+            refreshMenu()
+        }
+        return null
+    }
+
+    fun changePrice(item: MenuItem, newPrice: Double) {
+        runBusy("menu:${item.id}") {
+            withContext(Dispatchers.IO) { MenuRepository.update(item.id, price = newPrice) }
+            toast("已改价：${item.name} ${formatPrice(newPrice)} 元")
+            refreshMenu()
+        }
+    }
+
+    fun toggleAvailable(item: MenuItem) {
+        runBusy("menu:${item.id}") {
+            withContext(Dispatchers.IO) { MenuRepository.update(item.id, available = !item.available) }
+            toast(if (item.available) "已停售：${item.name}" else "已恢复在售：${item.name}")
+            refreshMenu()
+        }
+    }
+
+    fun deleteMenuItem(item: MenuItem) {
+        runBusy("menu:${item.id}") {
+            try {
+                withContext(Dispatchers.IO) { MenuRepository.delete(item.id) }
+            } catch (e: Exception) {
+                throw IllegalStateException("${e.message}（有订单的菜只能停售，不能删除）")
+            }
+            toast("已删除：${item.name}")
+            refreshMenu()
+        }
+    }
+
+    fun generateDrafts(description: String) {
+        if (description.isBlank()) {
+            toast("先写一句店铺描述，如：川菜小店，家常菜，20-30 元")
+            return
+        }
+        runBusy("menu:generate") {
+            try {
+                val d = withContext(Dispatchers.IO) { MenuRepository.generate(description.trim()) }
+                _drafts.value = d
+                toast("AI 草稿 ${d.size} 道，勾选后加入菜单才生效")
+            } catch (e: Exception) {
+                throw IllegalStateException("${e.message}（没有模型密钥时请用手动添加）")
+            }
+        }
+    }
+
+    fun addDrafts(selected: List<MenuItem>) {
+        if (selected.isEmpty()) return
+        runBusy("menu:drafts") {
+            val added = mutableListOf<MenuItem>()
+            val failed = mutableListOf<String>()
+            for (d in selected) {
+                val p = d.price.toDoubleOrNull()
+                if (p == null || p <= 0) { failed += "${d.name}（价格无效）"; continue }
+                try {
+                    withContext(Dispatchers.IO) { MenuRepository.add(d.name, p, "ai") }
+                    added += d
+                } catch (e: Exception) {
+                    failed += d.name
+                }
+            }
+            _drafts.value = _drafts.value.filterNot { d -> added.any { it.name == d.name } }
+            toast(
+                if (failed.isEmpty()) "已加入 ${added.size} 道菜"
+                else "已加入 ${added.size} 道；失败：${failed.joinToString("、")}"
+            )
+            refreshMenu()
+        }
+    }
+
+    fun clearDrafts() { _drafts.value = emptyList() }
+
+    override fun onCleared() {
+        stopAutoRefresh()
+        super.onCleared()
+    }
+
+    companion object {
+        const val POLL_MS = 8_000L
+    }
+}

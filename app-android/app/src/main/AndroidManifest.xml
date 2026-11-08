@@ -4,10 +4,27 @@
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <!-- targetSdk 34：前台服务必须声明类型，轮询新单用 dataSync。 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
   <application android:label="小店AI助手" android:theme="@android:style/Theme.Material.Light.NoActionBar">
-    <activity android:name=".MainActivity" android:exported="true">
+    <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
     </activity>
+    <!-- 不漏单：每 8 秒轮询新单 / 待人工，发通知、响提示音、TTS 播报。 -->
+    <service
+        android:name=".OrderAlertService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
+    <!-- 视频 / 文件先带鉴权头下载到 cacheDir/media，再通过 FileProvider 交给系统应用打开。 -->
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+      <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/file_paths" />
+    </provider>
     <!-- Notification-listener service: real parsing needs pilot measurement of the
          merchant's own WeChat pay-reminder wording; declared here, logic is a stub. -->
     <service android:name=".PaymentNotificationListener" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="false">

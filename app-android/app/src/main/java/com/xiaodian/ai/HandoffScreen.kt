@@ -1,25 +1,41 @@
 package com.xiaodian.ai
 
+// 老板模式「待处理」页：顾客发来的语音 / 图片 / 视频 / 文件。
+// 媒体都先用带鉴权头的请求下载到 cacheDir/media：
+//   图片：按屏幕宽度用 inSampleSize 缩小后再解码；
+//   语音：MediaPlayer 播放，离开页面（卡片移出）时 DisposableEffect 释放；
+//   视频 / 文件：通过 FileProvider 用 ACTION_VIEW 交给系统应用打开。
+// 回复草稿存在 ViewModel（按 msgid），自动刷新不会丢、不会抢焦点。
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaPlayer
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import android.media.MediaPlayer
-import android.net.Uri
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,212 +43,251 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// Boss-mode handoff screen (step 1 of the App plan, 2026-11-03).
-// NO timed polling (2026-11-03 user report: auto-refresh kept
-// interrupting typing/replying). Refresh is manual + on entry +
-// after a reply/resolve, so a draft in a card is never reset by
-// a background refresh. Server is still the source of truth, the
-// boss just pulls it when they want it.
 @Composable
-fun HandoffScreen(baseUrl: String, auth: AppAuth = AppAuth()) {
-    var items by remember { mutableStateOf<List<HandoffItem>>(emptyList()) }
-    var error by remember { mutableStateOf("") }
-    var refreshing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    fun refresh() {
-        scope.launch {
-            refreshing = true
-            try {
-                val fresh = withContext(Dispatchers.IO) {
-                    HandoffRepository(baseUrl, auth = auth).fetchHandoffs()
-                }
-                // Only assign when changed: assigning an identical list
-                // still recomposes the cards and can steal input focus.
-                if (fresh != items) items = fresh
-                error = ""
-            } catch (e: Exception) {
-                error = "拉取待处理失败：${e.message}"
-            } finally {
-                refreshing = false
-            }
-        }
-    }
-
-    // Once on entry only. No while(true) polling loop.
-    LaunchedEffect(baseUrl) {
-        refresh()
-    }
-
-    Column(Modifier.padding(16.dp)) {
-        Text("待人工处理（语音 / 图片 / 视频 / 文件）")
-        Text("文字点单不受影响，AI 照常回；这里只处理媒体那条。")
-        Text("不自动刷新：进页面拉一次，之后点“立即刷新”查看新消息，正在输入的回复不会被刷新打断。")
-        if (error.isNotBlank()) Text(error)
-        Button(onClick = { refresh() }, enabled = !refreshing) {
-            Text(if (refreshing) "刷新中…" else "立即刷新")
-        }
-        Spacer(Modifier.height(8.dp))
+fun HandoffPage(
+    items: List<HandoffItem>,
+    drafts: Map<String, String>,
+    busy: Set<String>,
+    loadError: String,
+    onDraftChange: (HandoffItem, String) -> Unit,
+    onReply: (HandoffItem) -> Unit,
+    onResolve: (HandoffItem) -> Unit,
+    onSendImage: (HandoffItem, android.net.Uri) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val now = rememberNow()
+    LazyColumn(
+        modifier.fillMaxSize(),
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (loadError.isNotBlank()) item(key = "err") { ErrorText(loadError) }
         if (items.isEmpty()) {
-            Text("暂无待处理")
-        } else {
-            // Same fix as OrderScreen: plain Column, not LazyColumn,
-            // because MainActivity already vertical-scrolls the page.
-            // A LazyColumn here crashes the same way once a handoff
-            // item appears and the list recomposes on refresh.
-            Column {
-                for (item in items) {
-                    HandoffCard(item, baseUrl, auth, onDone = { refresh() })
-                    Spacer(Modifier.height(8.dp))
-                }
+            item(key = "empty") {
+                Text(
+                    "暂无待处理",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(vertical = 32.dp),
+                )
             }
+        }
+        items(items, key = { "h-" + it.key() }) { item ->
+            HandoffCard(
+                item = item,
+                now = now,
+                draft = drafts[item.key()] ?: "",
+                isBusy = "handoff:${item.key()}" in busy,
+                onDraftChange = { onDraftChange(item, it) },
+                onReply = { onReply(item) },
+                onResolve = { onResolve(item) },
+                onSendImage = { uri -> onSendImage(item, uri) },
+            )
         }
     }
 }
 
 @Composable
-private fun HandoffCard(item: HandoffItem, baseUrl: String, auth: AppAuth = AppAuth(), onDone: () -> Unit) {
+private fun HandoffCard(
+    item: HandoffItem,
+    now: Long,
+    draft: String,
+    isBusy: Boolean,
+    onDraftChange: (String) -> Unit,
+    onReply: () -> Unit,
+    onResolve: () -> Unit,
+    onSendImage: (android.net.Uri) -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var replyText by remember { mutableStateOf("") }
-    var status by remember { mutableStateOf("") }
-    var imageBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var mediaStatus by remember { mutableStateOf("") }
+    var imageBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var loading by remember { mutableStateOf(false) }
 
-    // Send an image to this customer: pick from gallery, upload via
-    // POST /kf/send-image. Use cases: payment QR code image, daily
-    // activity poster, or any other merchant image. The image counts
-    // as one 48h/5 message on the backend, like a text reply.
-    val imagePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            try {
-                val bytes = withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri)?.readBytes()
-                        ?: throw IllegalStateException("读取图片失败")
-                }
-                if (bytes.size > 2 * 1024 * 1024) {
-                    status = "图片超过 2MB，微信会拒收，请换张小图"
-                    return@launch
-                }
-                val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
-                withContext(Dispatchers.IO) {
-                    HandoffRepository(baseUrl, auth = auth).sendImage(
-                        item.externalUserid, bytes, "send.jpg", mime)
-                }
-                status = "图片已发送"
-            } catch (e: Exception) {
-                status = "发送图片失败：${e.message}"
-            }
+    fun releasePlayer() {
+        val p = player
+        player = null
+        if (p != null) {
+            try { p.stop() } catch (_: Exception) {}
+            try { p.release() } catch (_: Exception) {}
         }
     }
 
-    // Close media preview / stop voice: previously there was no way
-    // to close an opened image or stop a playing voice (2026-11-03
-    // user report: "App连关闭都没有").
-    fun closeMedia() {
-        try { player?.stop() } catch (_: Exception) {}
-        try { player?.release() } catch (_: Exception) {}
-        player = null
-        imageBitmap = null
-        status = ""
+    // 卡片离开屏幕 / 切页 / 退出时释放播放器。
+    DisposableEffect(item.key()) {
+        onDispose { releasePlayer() }
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) onSendImage(uri)
+    }
+
+    fun openMedia() {
+        if (item.mediaId.isBlank()) {
+            mediaStatus = "这条消息没有媒体 ID"
+            return
+        }
+        loading = true
+        mediaStatus = ""
+        scope.launch {
+            try {
+                when (item.msgtype) {
+                    "image" -> {
+                        val file = mediaFile(context, item, "jpg")
+                        withContext(Dispatchers.IO) { HandoffRepository.downloadMedia(item.mediaId, file) }
+                        val width = context.resources.displayMetrics.widthPixels
+                        imageBitmap = withContext(Dispatchers.IO) { decodeSampled(file, width) }
+                        if (imageBitmap == null) mediaStatus = "图片解码失败"
+                    }
+                    "voice" -> {
+                        val file = mediaFile(context, item, "amr")
+                        withContext(Dispatchers.IO) { HandoffRepository.downloadMedia(item.mediaId, file) }
+                        releasePlayer()
+                        val p = MediaPlayer()
+                        p.setDataSource(file.absolutePath)
+                        p.setOnCompletionListener {
+                            if (player === it) releasePlayer()
+                            mediaStatus = "播放结束"
+                        }
+                        p.prepare()
+                        p.start()
+                        player = p
+                        mediaStatus = "正在播放语音"
+                    }
+                    else -> {
+                        val file = mediaFile(context, item, "bin")
+                        val contentType = withContext(Dispatchers.IO) {
+                            HandoffRepository.downloadMedia(item.mediaId, file)
+                        }
+                        openWithSystem(context, file, item, contentType)
+                    }
+                }
+            } catch (e: Exception) {
+                mediaStatus = "打开失败：${e.message}"
+            } finally {
+                loading = false
+            }
+        }
     }
 
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
-            Text("${item.typeLabel()} · 顾客 ${item.externalUserid.take(12)}…")
-            Text(item.createdAt)
+        Column(Modifier.padding(16.dp)) {
+            Text("${item.typeLabel()} · ${TimeFmt.relative(item.createdAt, now)}", style = MaterialTheme.typography.titleLarge)
+            Text("顾客 ${shortCustomer(item.externalUserid)}", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
             Row {
-                OutlinedButton(onClick = {
-                    scope.launch {
-                        try {
-                            when (item.msgtype) {
-                                "image" -> {
-                                    val bytes = withContext(Dispatchers.IO) {
-                                        HandoffRepository(baseUrl, auth = auth).downloadMedia(item.mediaId)
-                                    }
-                                    imageBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                }
-                                "voice" -> {
-                                    val bytes = withContext(Dispatchers.IO) {
-                                        HandoffRepository(baseUrl, auth = auth).downloadMedia(item.mediaId)
-                                    }
-                                    val tmp = File(context.cacheDir, "handoff_${item.msgid}.amr")
-                                    tmp.writeBytes(bytes)
-                                    val p = MediaPlayer()
-                                    p.setDataSource(tmp.absolutePath)
-                                    p.prepare()
-                                    p.start()
-                                    player = p
-                                    status = "正在播放语音"
-                                }
-                                else -> {
-                                    // Video / file: hand to the system player/viewer.
-                                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                                        data = Uri.parse(HandoffRepository(baseUrl, auth = auth).mediaUrl(item.mediaId))
-                                    }
-                                    context.startActivity(intent)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            status = "媒体打开失败：${e.message}"
-                        }
-                    }
-                }) { Text("查看 / 播放") }
+                OutlinedButton(
+                    onClick = { openMedia() },
+                    enabled = !loading,
+                    modifier = Modifier.height(52.dp),
+                ) { Text(if (loading) "加载中…" else if (item.msgtype == "voice") "播放语音" else "查看${item.typeLabel()}") }
+                if (imageBitmap != null || player != null) {
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            releasePlayer()
+                            imageBitmap = null
+                            mediaStatus = ""
+                        },
+                        modifier = Modifier.height(52.dp),
+                    ) { Text(if (player != null) "停止" else "收起") }
+                }
             }
-            if (imageBitmap != null) {
-                Image(bitmap = imageBitmap!!.asImageBitmap(), contentDescription = "顾客图片")
+            imageBitmap?.let { bmp ->
+                Spacer(Modifier.height(8.dp))
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "顾客图片",
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
-            if (imageBitmap != null || player != null) {
-                OutlinedButton(onClick = { closeMedia() }) { Text("关闭媒体") }
-            }
-            TextField(
-                value = replyText,
-                onValueChange = { replyText = it },
-                label = { Text("回顾客的话") },
+            if (mediaStatus.isNotBlank()) Text(mediaStatus, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = draft,
+                onValueChange = onDraftChange,
+                label = { Text("回复顾客") },
                 modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
             )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = onReply,
+                enabled = draft.isNotBlank() && !isBusy,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+            ) { Text(if (isBusy) "提交中…" else "发送给顾客") }
+            Spacer(Modifier.height(8.dp))
             Row {
-                Button(onClick = {
-                    scope.launch {
-                        try {
-                            withContext(Dispatchers.IO) {
-                                HandoffRepository(baseUrl, auth = auth).reply(item.externalUserid, replyText, item.msgid)
-                            }
-                            status = "已发送"
-                            replyText = ""
-                            onDone()
-                        } catch (e: Exception) {
-                            status = "发送失败：${e.message}"
-                        }
-                    }
-                }, enabled = replyText.isNotBlank()) { Text("发送给顾客") }
-                OutlinedButton(onClick = {
-                    scope.launch {
-                        try {
-                            withContext(Dispatchers.IO) {
-                                HandoffRepository(baseUrl, auth = auth).resolve(item.externalUserid, item.msgid)
-                            }
-                            onDone()
-                        } catch (e: Exception) {
-                            status = "标记失败：${e.message}"
-                        }
-                    }
-                }) { Text("已处理") }
-                OutlinedButton(onClick = {
-                    imagePicker.launch("image/*")
-                }) { Text("发送图片") }
+                OutlinedButton(
+                    onClick = { imagePicker.launch("image/*") },
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f).height(52.dp),
+                ) { Text("发送图片") }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = onResolve,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f).height(52.dp),
+                ) { Text("已处理") }
             }
-            if (status.isNotBlank()) Text(status)
         }
+    }
+}
+
+private fun mediaFile(context: Context, item: HandoffItem, ext: String): File {
+    val dir = File(context.cacheDir, "media")
+    dir.mkdirs()
+    val safe = item.key().replace(Regex("[^A-Za-z0-9_-]"), "_").take(80)
+    return File(dir, "handoff_$safe.$ext")
+}
+
+/** 按目标宽度计算 inSampleSize，先读尺寸再缩小解码，避免大图 OOM。 */
+private fun decodeSampled(file: File, reqWidth: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    val target = if (reqWidth > 0) reqWidth else 1080
+    while (bounds.outWidth / (sample * 2) >= target) sample *= 2
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeFile(file.absolutePath, opts)
+}
+
+/** 视频 / 文件：改成正确扩展名后用 FileProvider 交给系统应用打开。 */
+private fun openWithSystem(context: Context, downloaded: File, item: HandoffItem, contentType: String) {
+    var mime = contentType.substringBefore(';').trim().lowercase()
+    if (mime.isEmpty() || mime == "application/octet-stream") {
+        mime = if (item.msgtype == "video") "video/mp4" else "*/*"
+    }
+    val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+        ?: if (item.msgtype == "video") "mp4" else "bin"
+    val target = File(downloaded.parentFile, downloaded.nameWithoutExtension + "." + ext)
+    if (target.absolutePath != downloaded.absolutePath) {
+        if (target.exists()) target.delete()
+        if (!downloaded.renameTo(target)) {
+            downloaded.copyTo(target, overwrite = true)
+            downloaded.delete()
+        }
+    }
+    val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", target)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mime)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    try {
+        context.startActivity(intent)
+    } catch (e: ActivityNotFoundException) {
+        throw IllegalStateException("手机上没有能打开这个${item.typeLabel()}的应用")
     }
 }
