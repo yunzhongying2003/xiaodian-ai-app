@@ -27,12 +27,7 @@ data class KitchenOrder(
 ) {
     fun statusLabel(): String = statusLabelOf(status)
 
-    fun fulfillmentLabel(): String = when (fulfillment) {
-        "pickup" -> "自取"
-        "delivery" -> "配送"
-        "dine_in" -> "堂食"
-        else -> fulfillment
-    }
+    fun fulfillmentLabel(): String = fulfillmentLabelOf(fulfillment)
 
     /** Only the legal next statuses from orders.py. */
     fun nextStatuses(): List<String> = when (status) {
@@ -63,6 +58,13 @@ data class KitchenOrder(
     }
 
     fun isActive(): Boolean = status !in setOf("completed", "cancelled")
+}
+
+fun fulfillmentLabelOf(fulfillment: String): String = when (fulfillment) {
+    "pickup" -> "自取"
+    "delivery" -> "配送"
+    "dine_in" -> "堂食"
+    else -> fulfillment
 }
 
 fun statusLabelOf(status: String): String = when (status) {

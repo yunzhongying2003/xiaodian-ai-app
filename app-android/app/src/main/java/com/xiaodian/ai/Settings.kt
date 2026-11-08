@@ -60,6 +60,24 @@ class AppSettings(context: Context) {
         get() = prefs.getBoolean(KEY_TTS, true)
         set(value) { prefs.edit().putBoolean(KEY_TTS, value).apply() }
 
+    /** 播报优先用服务器人声（/tts/synthesize）；失败或服务器没开时退回手机 TTS。 */
+    var serverTtsEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SERVER_TTS, true)
+        set(value) { prefs.edit().putBoolean(KEY_SERVER_TTS, value).apply() }
+
+    // 已经提醒 / 播报过的事件 key（new:<order_id>、paid:<order_id>、handoff:<id>），
+    // SSE 和轮询共用，避免同一单播报两次。按加入顺序保存，最多 MAX_ANNOUNCED 条。
+    fun announcedKeys(): List<String> =
+        (prefs.getString(KEY_ANNOUNCED, "") ?: "").split('\n').filter { it.isNotBlank() }
+    fun hasAnnouncedBaseline(): Boolean = prefs.getBoolean(KEY_ANNOUNCED_INIT, false)
+    /** baseline=true：第一次全量对比已完成，之后新出现的才提醒。 */
+    fun saveAnnouncedKeys(keys: Collection<String>, baseline: Boolean) {
+        val list = keys.toList().takeLast(MAX_ANNOUNCED)
+        val e = prefs.edit().putString(KEY_ANNOUNCED, list.joinToString("\n"))
+        if (baseline) e.putBoolean(KEY_ANNOUNCED_INIT, true)
+        e.apply()
+    }
+
     // 提醒服务已经见过的 id，用来判断「新」单 / 「新」待人工。
     fun seenIds(kind: String): Set<String> = prefs.getStringSet("seen_$kind", null)?.toSet() ?: emptySet()
     fun hasSeenBaseline(kind: String): Boolean = prefs.getBoolean("seen_init_$kind", false)
@@ -80,5 +98,9 @@ class AppSettings(context: Context) {
         private const val KEY_MODE = "app_mode"
         private const val KEY_ALERTS = "alerts_enabled"
         private const val KEY_TTS = "tts_enabled"
+        private const val KEY_SERVER_TTS = "server_tts_enabled"
+        private const val KEY_ANNOUNCED = "announced_keys_v1"
+        private const val KEY_ANNOUNCED_INIT = "announced_init_v1"
+        private const val MAX_ANNOUNCED = 2000
     }
 }

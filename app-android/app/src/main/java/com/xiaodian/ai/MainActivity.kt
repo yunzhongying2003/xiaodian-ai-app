@@ -3,7 +3,8 @@ package com.xiaodian.ai
 // App 入口。老板模式 + 后厨模式同属一个 App，一键切换（模式隔离 / 老板 PIN
 // 用户决定暂缓）。当前模式存在 SharedPreferences，重启后保持。
 // - 后厨：全屏看板。
-// - 老板：底部导航四页（待处理 / 订单 / 菜单 / 设置），顶部显示今日已完成金额。
+// - 老板：底部导航四页（待处理 / 订单 / 菜单 / 设置），顶部显示今日单数、营业额、热销前 3
+//   （/app/stats/today；旧后端退回 /kf/usage 的今日已完成金额）。
 // 数据都在 AppViewModel；前台时每 8 秒自动刷新，后台由 OrderAlertService 提醒。
 // 没有登录 token（首次启动、退出登录、收到 401）时显示登录页。
 import android.Manifest
@@ -145,7 +146,15 @@ private fun LoggedInRoot(vm: AppViewModel, onAlertsChanged: () -> Unit, onExit: 
 }
 
 @Composable
-private fun TopBar(title: String, subtitle: String, refreshing: Boolean, onRefresh: () -> Unit, switchLabel: String, onSwitch: () -> Unit) {
+private fun TopBar(
+    title: String,
+    subtitle: String,
+    refreshing: Boolean,
+    onRefresh: () -> Unit,
+    switchLabel: String,
+    onSwitch: () -> Unit,
+    extra: String = "",
+) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 2.dp) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -155,6 +164,9 @@ private fun TopBar(title: String, subtitle: String, refreshing: Boolean, onRefre
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 if (subtitle.isNotBlank()) {
                     Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (extra.isNotBlank()) {
+                    Text(extra, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
             }
             IconButton(onClick = onRefresh, enabled = !refreshing) {
@@ -214,6 +226,7 @@ private fun BossRoot(
     val menu by vm.menu.collectAsState()
     val drafts by vm.drafts.collectAsState()
     val usage by vm.usage.collectAsState()
+    val stats by vm.stats.collectAsState()
     val replyDrafts by vm.replyDrafts.collectAsState()
     val busy by vm.busy.collectAsState()
     val loadError by vm.loadError.collectAsState()
@@ -225,7 +238,14 @@ private fun BossRoot(
 
     LaunchedEffect(Unit) { vm.refreshMenuNow() }
 
-    val amount = usage?.let { "今日已完成 ¥" + formatPrice(it.completedAmount) } ?: "今日已完成 —"
+    val st = stats
+    val amount = when {
+        st != null -> "今日 ${st.orders} 单 · 营业额 ¥" + formatPrice(st.revenue)
+        usage != null -> "今日已完成 ¥" + formatPrice(usage!!.completedAmount)
+        else -> "今日已完成 —"
+    }
+    val hot = st?.topItems?.takeIf { it.isNotEmpty() }
+        ?.joinToString("、", prefix = "热销 ") { "${it.name}×${it.qty}" } ?: ""
 
     Scaffold(
         topBar = {
@@ -236,6 +256,7 @@ private fun BossRoot(
                 onRefresh = { if (tab == BossTab.MENU) vm.refreshMenuNow() else vm.refreshAll() },
                 switchLabel = "后厨模式",
                 onSwitch = { vm.setMode(AppMode.KITCHEN) },
+                extra = hot,
             )
         },
         bottomBar = {

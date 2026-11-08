@@ -2,6 +2,10 @@ package com.xiaodian.ai
 
 // 设置页：当前用户、本机登录有效期、退出登录；新单提醒和语音播报开关；
 // 切换模式、退出 App。服务器地址在登录页修改（这里只显示）。
+// 「使用服务器人声」（默认开）；「保持后台提醒」（电池优化白名单）和「自启动设置」（国产系统）。
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -44,6 +48,17 @@ fun SettingsPage(
     val context = LocalContext.current
     var alerts by remember { mutableStateOf(settings.alertsEnabled) }
     var tts by remember { mutableStateOf(settings.ttsEnabled) }
+    var serverTts by remember { mutableStateOf(settings.serverTtsEnabled) }
+    var batteryOk by remember { mutableStateOf(BackgroundGuide.isIgnoringBatteryOptimizations(context)) }
+    val batteryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        batteryOk = BackgroundGuide.isIgnoringBatteryOptimizations(context)
+    }
+    val launchBattery: () -> Unit = {
+        for (i: Intent in BackgroundGuide.batteryIntents(context)) {
+            val ok = try { batteryLauncher.launch(i); true } catch (_: Exception) { false }
+            if (ok) break
+        }
+    }
     var confirmLogout by remember { mutableStateOf(false) }
     val versionText = remember {
         try {
@@ -90,8 +105,40 @@ fun SettingsPage(
                         tts = it
                         settings.ttsEnabled = it
                     }
+                    SwitchRow("使用服务器人声", serverTts, enabled = alerts && tts) {
+                        serverTts = it
+                        settings.serverTtsEnabled = it
+                    }
                     Text(
-                        "提醒开着时，退出 App 后仍在后台监听新单。",
+                        "提醒开着时，退出 App 后仍在后台监听新单。服务器人声不可用时自动改用手机语音。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        item(key = "background") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("后台保活", style = MaterialTheme.typography.titleMedium)
+                    if (batteryOk) {
+                        OutlinedButton(
+                            onClick = {},
+                            enabled = false,
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                        ) { Text("保持后台提醒：已开启") }
+                    } else {
+                        Button(
+                            onClick = launchBattery,
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                        ) { Text("保持后台提醒") }
+                    }
+                    OutlinedButton(
+                        onClick = { BackgroundGuide.openAutoStart(context) },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) { Text("自启动设置（小米 / 华为 / OPPO / vivo）") }
+                    Text(
+                        "手机省电策略可能在锁屏后关掉提醒。点「保持后台提醒」选「允许」；国产手机再到「自启动设置」里打开小店AI助手。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

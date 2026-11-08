@@ -4,7 +4,9 @@ package com.xiaodian.ai
 // - 刷新时按 id 合并：没变的条目保留原对象，列表 key 不变，
 //   所以正在输入的回复框不会被刷新打断、也不会丢焦点。
 // - 回复草稿按 msgid 存在这里，刷新、切页都不会丢。
-// - App 在前台时每 8 秒自动刷新一次订单和待人工；也保留手动刷新。
+// - App 在前台时每 8 秒自动刷新一次订单和待人工；后台服务的 SSE 在线时降为每 60 秒兜底，
+//   SSE 事件到达时立即刷新（AppEvents.refresh）。也保留手动刷新。
+// - 老板模式顶部：优先 /app/stats/today（今日单数、营业额、热销前 3），404 时退回 /kf/usage。
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
@@ -53,6 +55,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _usage = MutableStateFlow<Usage?>(null)
     val usage: StateFlow<Usage?> = _usage.asStateFlow()
 
+    /** 今日统计；null 表示还没拿到或后端不支持（这时顶部用 usage）。 */
+    private val _stats = MutableStateFlow<TodayStats?>(null)
+    val stats: StateFlow<TodayStats?> = _stats.asStateFlow()
+
+    /** 后端没有 /app/stats/today（404）时记下，10 分钟后再试。 */
+    @Volatile private var statsUnsupportedUntil = 0L
+    @Volatile private var lastLiveRefresh = 0L
+
     /** 回复草稿：msgid -> 文本。 */
     private val _replyDrafts = MutableStateFlow<Map<String, String>>(emptyMap())
     val replyDrafts: StateFlow<Map<String, String>> = _replyDrafts.asStateFlow()
@@ -73,6 +83,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val busy: StateFlow<Set<String>> = _busy.asStateFlow()
 
     private var autoJob: Job? = null
+
+    init {
+        // 后台服务收到 SSE 事件 → 立即刷新。
+        viewModelScope.launch {
+            AppEvents.refresh.collect {
+                if (autoJob?.isActive == true) refreshLive()
+            }
+        }
+    }
 
     fun consumeMessage() { _message.value = "" }
 
@@ -122,6 +141,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _menu.value = emptyList()
         _drafts.value = emptyList()
         _usage.value = null
+        _stats.value = null
         _replyDrafts.value = emptyMap()
         _loadError.value = ""
     }
@@ -145,7 +165,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             refreshAllInternal()
             while (isActive) {
                 delay(POLL_MS)
-                refreshLive()
+                // SSE 在线时只做 60 秒一次的兜底刷新。
+                val interval = if (AppEvents.sseConnected.value) OrderAlertService.FALLBACK_POLL_MS else POLL_MS
+                if (System.currentTimeMillis() - lastLiveRefresh >= interval - 500) refreshLive()
             }
         }
     }
@@ -173,6 +195,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 订单 + 待人工（+ 老板模式下的用量）。 */
     private suspend fun refreshLive() {
         if (!ApiClient.isLoggedIn()) return
+        lastLiveRefresh = System.currentTimeMillis()
         val errors = mutableListOf<String>()
         try {
             val fresh = withContext(Dispatchers.IO) { OrderRepository.fetchOrders() }
@@ -188,15 +211,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             errors += (e.message ?: "拉取待处理失败")
         }
-        if (_mode.value == AppMode.BOSS) {
-            try {
-                _usage.value = withContext(Dispatchers.IO) { MenuRepository.fetchUsage() }
-            } catch (e: Exception) {
-                errors += (e.message ?: "拉取用量失败")
-            }
-        }
+        if (_mode.value == AppMode.BOSS) refreshStats(errors)
         _loadError.value = if (ApiClient.isLoggedIn()) errors.distinct().joinToString("\n") else ""
         if (!ApiClient.isLoggedIn()) clearData()
+    }
+
+    /** 老板顶部统计：先试 /app/stats/today，404 退回 /kf/usage。 */
+    private suspend fun refreshStats(errors: MutableList<String>) {
+        if (System.currentTimeMillis() >= statsUnsupportedUntil) {
+            try {
+                _stats.value = withContext(Dispatchers.IO) { StatsRepository.fetchToday() }
+                return
+            } catch (e: ApiException) {
+                if (e.code == 404) {
+                    statsUnsupportedUntil = System.currentTimeMillis() + 10 * 60_000L
+                    _stats.value = null
+                } else {
+                    errors += (e.message ?: "拉取今日统计失败")
+                    return
+                }
+            } catch (e: UnauthorizedException) {
+                return
+            } catch (e: Exception) {
+                errors += (e.message ?: "拉取今日统计失败")
+                return
+            }
+        }
+        try {
+            _usage.value = withContext(Dispatchers.IO) { MenuRepository.fetchUsage() }
+        } catch (e: Exception) {
+            errors += (e.message ?: "拉取用量失败")
+        }
     }
 
     private suspend fun refreshMenu() {

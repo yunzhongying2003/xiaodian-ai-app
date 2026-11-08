@@ -1,6 +1,6 @@
-name: Android APK (debug)
+name: Android APK
 # 2026-11-08: re-register workflow on fork after enabling Actions.
-
+#
 # GitHub Actions 编译：解决 Muse VM 上 Gradle daemon 本地 TCP 被沙箱拦截的问题。
 # 推送到 GitHub 后自动编，APK 不放 Actions Artifacts，改放到 GitHub Releases
 #（用户 2026-11-03 明确要求：编译完成的 APK 放到 Releases）。
@@ -12,6 +12,15 @@ name: Android APK (debug)
 # 不再用 setup-android 这个 action，只用其自带的 sdkmanager 装需要的包。
 #
 # versionCode = GITHUB_RUN_NUMBER（通过 -PappVersionCode 传给 Gradle），versionName 见 app/build.gradle.kts。
+#
+# 2026-11-08 固定签名：
+# - 仓库 Settings → Secrets and variables → Actions 配了 SIGNING_KEYSTORE_B64 时：解码成 keystore，
+#   编 assembleRelease，用这把 key 签名（SIGNING_STORE_PASSWORD / SIGNING_KEY_ALIAS / SIGNING_KEY_PASSWORD）。
+# - 没配时：退回 debug 编译，Release 说明写「未配置签名，debug 包」。
+# - 手动运行（workflow_dispatch）勾选 signing_selftest：用临时生成的 key 走一遍 release 签名流程，
+#   只验证流程，不发布 Release。
+# - 产物命名 xiaodian-<versionName>-<run>.apk。
+# - Release 名称必须加引号：YAML 里「 #」后面会被当成注释吃掉。
 on:
   push:
     branches: [main]
@@ -19,6 +28,11 @@ on:
       - "app-android/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:
+    inputs:
+      signing_selftest:
+        description: "用临时 key 自测 release 签名流程（不发布 Release）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +40,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BUILD_TOOLS: /usr/local/lib/android/sdk/build-tools/34.0.0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,20 +59,126 @@ jobs:
           yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/usr/local/lib/android/sdk --licenses || true
           yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/usr/local/lib/android/sdk "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Build debug APK
+      - name: Read versionName
+        id: ver
+        run: |
+          v=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app-android/app/build.gradle.kts | head -n1)
+          if [ -z "$v" ]; then v="0.0.0"; fi
+          echo "name=$v" >> "$GITHUB_OUTPUT"
+          echo "apk=xiaodian-$v-${{ github.run_number }}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare signing
+        id: sign
+        env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          SELFTEST: ${{ github.event_name == 'workflow_dispatch' && inputs.signing_selftest }}
+        run: |
+          ks="$RUNNER_TEMP/xiaodian-release.jks"
+          if [ "$SELFTEST" = "true" ]; then
+            # 自测：临时 key，密码随机，用完即弃。
+            sp=$(openssl rand -hex 16); kp=$(openssl rand -hex 16)
+            echo "::add-mask::$sp"; echo "::add-mask::$kp"
+            keytool -genkeypair -storetype JKS -keystore "$ks" -alias selftest -keyalg RSA -keysize 2048 \
+              -validity 1 -storepass "$sp" -keypass "$kp" -dname "CN=selftest" >/dev/null 2>&1
+            {
+              echo "SELFTEST_STORE_PASSWORD=$sp"
+              echo "SELFTEST_KEY_PASSWORD=$kp"
+              echo "SELFTEST_KEY_ALIAS=selftest"
+            } >> "$GITHUB_ENV"
+            echo "mode=selftest" >> "$GITHUB_OUTPUT"
+          elif [ -n "$SIGNING_KEYSTORE_B64" ]; then
+            printf '%s' "$SIGNING_KEYSTORE_B64" | tr -d ' \r\n' | base64 -d > "$ks"
+            if [ ! -s "$ks" ]; then echo "::error::SIGNING_KEYSTORE_B64 解码失败"; exit 1; fi
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::未配置 SIGNING_KEYSTORE_B64，本次编译 debug 包"
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          fi
+          echo "keystore=$ks" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK (signed)
+        if: steps.sign.outputs.mode == 'release' || steps.sign.outputs.mode == 'selftest'
+        uses: gradle/gradle-build-action@v3
+        env:
+          SIGNING_STORE_FILE: ${{ steps.sign.outputs.keystore }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD || env.SELFTEST_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS || env.SELFTEST_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD || env.SELFTEST_KEY_PASSWORD }}
+        with:
+          gradle-version: "8.7"
+          build-root-directory: app-android
+          arguments: :app:assembleRelease --stacktrace -PappVersionCode=${{ github.run_number }}
+
+      - name: Build debug APK (no signing secret)
+        if: steps.sign.outputs.mode == 'debug'
         uses: gradle/gradle-build-action@v3
         with:
           gradle-version: "8.7"
           build-root-directory: app-android
           arguments: :app:assembleDebug --stacktrace -PappVersionCode=${{ github.run_number }}
 
+      - name: Collect APK
+        id: apk
+        env:
+          MODE: ${{ steps.sign.outputs.mode }}
+          APK_NAME: ${{ steps.ver.outputs.apk }}
+        run: |
+          mkdir -p dist
+          if [ "$MODE" = "debug" ]; then
+            src=app-android/app/build/outputs/apk/debug/app-debug.apk
+          else
+            src=app-android/app/build/outputs/apk/release/app-release.apk
+          fi
+          if [ ! -f "$src" ]; then
+            echo "::error::找不到 $src"; ls -R app-android/app/build/outputs/apk || true; exit 1
+          fi
+          cp "$src" "dist/$APK_NAME"
+          # 校验签名并取证书 SHA-256（公开信息，用来确认每次都是同一把 key）
+          "$BUILD_TOOLS/apksigner" verify --print-certs "dist/$APK_NAME" | tee signer.txt
+          sha=$(grep -m1 'certificate SHA-256 digest' signer.txt | awk -F': ' '{print $2}')
+          echo "cert_sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "path=dist/$APK_NAME" >> "$GITHUB_OUTPUT"
+          rm -f "${{ steps.sign.outputs.keystore }}"
+
+      - name: Release notes
+        id: notes
+        env:
+          MODE: ${{ steps.sign.outputs.mode }}
+          SHA: ${{ steps.apk.outputs.cert_sha256 }}
+          VER: ${{ steps.ver.outputs.name }}
+        run: |
+          if [ "$MODE" = "release" ]; then
+            {
+              echo "正式签名 release 包，版本 $VER（versionCode ${{ github.run_number }}）。"
+              echo ""
+              echo "签名证书 SHA-256：\`$SHA\`"
+            } > notes.md
+            echo "title=小店AI助手 $VER build #${{ github.run_number }}（${{ github.ref_name }}）" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "未配置签名，debug 包。版本 $VER（versionCode ${{ github.run_number }}）。"
+              echo ""
+              echo "debug 签名证书 SHA-256：\`$SHA\`"
+            } > notes.md
+            echo "title=小店AI助手 $VER Debug build #${{ github.run_number }}（${{ github.ref_name }}）" >> "$GITHUB_OUTPUT"
+          fi
+          cat notes.md
+
+      - name: Self-test result
+        if: steps.sign.outputs.mode == 'selftest'
+        run: |
+          echo "release 签名流程自测通过：${{ steps.apk.outputs.path }}，证书 SHA-256 ${{ steps.apk.outputs.cert_sha256 }}"
+          echo "自测不发布 Release。"
+
       - name: Publish APK to Releases
+        if: steps.sign.outputs.mode != 'selftest'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
+          tag_name: "build-${{ github.run_number }}"
           # 让 tag 指向本次编译的提交（手动对分支触发时也一样），而不是默认分支
           target_commitish: ${{ github.sha }}
-          name: 小店AI助手 Debug build #${{ github.run_number }} (${{ github.ref_name }})
-          prerelease: true
+          name: "${{ steps.notes.outputs.title }}"
+          body_path: notes.md
+          prerelease: ${{ steps.sign.outputs.mode != 'release' }}
           generate_release_notes: true
-          files: app-android/app/build/outputs/apk/debug/app-debug.apk
+          files: ${{ steps.apk.outputs.path }}
