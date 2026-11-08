@@ -6,7 +6,7 @@
 ## 编译与下载
 - 编译走 GitHub Actions：仓库根目录 `.github/workflows/android.yml`。
 - 产物**发布到 GitHub Releases**（tag `build-N`），文件名 `xiaodian-<versionName>-<N>.apk`。不放 Actions Artifacts。
-- `versionCode` = CI 的 `GITHUB_RUN_NUMBER`（通过 `-PappVersionCode` 传入，本地默认 1）；`versionName` = 0.3.0。
+- `versionCode` = CI 的 `GITHUB_RUN_NUMBER`（通过 `-PappVersionCode` 传入，本地默认 1）；`versionName` = 0.3.1。
 
 ### 固定签名
 - 仓库 Settings → Secrets and variables → Actions 配好 4 个 secret 后，CI 编 `assembleRelease` 并用正式 key 签名：
@@ -35,6 +35,7 @@
 | `OrderAlertService.kt` | 前台服务（dataSync）：SSE 长连接 + 轮询兜底，按模式提醒（通知 + 提示音 + 播报）。 |
 | `EventStream.kt` | 手写 SSE 解析（`SseParser`）和 `/app/events` 连接；`AppEvents` 通知界面刷新、告知 SSE 是否在线。 |
 | `Speaker.kt` | 播报：服务器人声（`/tts/synthesize`，缓存在 cacheDir/tts）失败退回手机 TTS，按顺序播。 |
+| `SpeechDiag.kt` | 播报诊断：`SpeechReport`（每次播报每一步的结果）、`SpeechDiagStore`（存 SharedPreferences，设置页显示）。 |
 | `StatsApi.kt` | 今日统计 `/app/stats/today`。 |
 | `BackgroundGuide.kt` | 电池优化白名单、国产系统自启动设置入口。 |
 | `OrderScreen.kt` | 后厨看板、老板订单页（确认已收款）。 |
@@ -61,7 +62,12 @@
   - 老板：`order_new` →「有新单待收款，取餐号 X」；`handoff_new` →「有一条待人工消息」；
   - 后厨：`order_paid` →「新单，取餐号 X，自取/配送」；不播 `order_new` 和待人工。
 - 播报优先用服务器人声：设置「使用服务器人声」开着、`/health` 的 `tts` 为 `"on"` 时，
-  `POST /tts/synthesize {"text": "..."}`（Bearer）拿 mp3 播放；失败、超过 5 秒或 tts 不是 on 时用手机 TTS。
+  `POST /tts/synthesize {"text": "..."}`（Bearer）拿 mp3 播放；失败、超过 10 秒、播放出错/超时或 tts 不是 on 时用手机 TTS。
+- 播报音频属性：`USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` + `CONTENT_TYPE_SPEECH`（音量跟媒体音量，勿扰模式不屏蔽），播放时申请临时音频焦点。
+- 手机 TTS 需要 Manifest 里 `<queries>` 声明 `android.intent.action.TTS_SERVICE`（targetSdk 30+ 不声明就找不到引擎）。
+- 播报诊断（0.3.1）：设置页「试听播报」走真实新单同一条路径（提示音 → speechQueue → Speaker；服务没运行时在界面内播放），
+  下方显示开关、/health、/tts/synthesize、MediaPlayer、手机 TTS（init / setLanguage / 引擎 / speak / 回调）、音频焦点、媒体音量、勿扰模式，可复制；
+  每次真实播报的诊断也写进 SharedPreferences，设置页显示「最近一次播报：时间 + 结果摘要」。
 - 需要的权限：`POST_NOTIFICATIONS`（Android 13+ 运行时申请）、`FOREGROUND_SERVICE_DATA_SYNC`、
   `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
 - 设置页「保持后台提醒」把 App 加入电池白名单；「自启动设置」跳小米 / 华为 / OPPO / vivo 的自启动页面（失败打开应用详情）。

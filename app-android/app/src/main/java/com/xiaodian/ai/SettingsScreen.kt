@@ -3,6 +3,8 @@ package com.xiaodian.ai
 // 设置页：当前用户、本机登录有效期、退出登录；新单提醒和语音播报开关；
 // 切换模式、退出 App。服务器地址在登录页修改（这里只显示）。
 // 「使用服务器人声」（默认开）；「保持后台提醒」（电池优化白名单）和「自启动设置」（国产系统）。
+// 0.3.1「播报诊断」：试听播报按钮（和真实新单同一条路径），下方显示完整诊断，可选中/复制；
+// 另显示「最近一次播报：时间 + 结果摘要」（真实新单播报后由 Speaker 写入）。
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,6 +17,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -60,6 +72,18 @@ fun SettingsPage(
         }
     }
     var confirmLogout by remember { mutableStateOf(false) }
+    remember { SpeechDiagStore.load(context); true }
+    val diag by SpeechDiagStore.state.collectAsState()
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    var showRealDetail by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(diag.testRunning) {
+        if (diag.testRunning) {
+            delay(60_000)
+            SpeechDiagStore.testTimedOut(context)
+        }
+    }
     val versionText = remember {
         try {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -114,6 +138,74 @@ fun SettingsPage(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+        }
+        item(key = "speech_diag") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("播报诊断", style = MaterialTheme.typography.titleMedium)
+                    Button(
+                        onClick = {
+                            copied = false
+                            SpeechDiagStore.markTestRunning(context)
+                            val svc = OrderAlertService.running
+                            if (svc != null) {
+                                svc.testAnnounce()
+                            } else {
+                                scope.launch { OrderAlertService.testInForeground(context) }
+                            }
+                        },
+                        enabled = !diag.testRunning,
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) { Text(if (diag.testRunning) "正在试听…" else "试听播报") }
+                    Text(
+                        "会先响提示音，再播「${OrderAlertService.TEST_TEXT}」，和真实新单走同一条路。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (diag.testText.isNotBlank()) {
+                        SelectionContainer {
+                            Text(
+                                diag.testText,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                    Text(
+                        if (diag.realTime > 0) "最近一次播报：${SpeechDiagStore.fmt(diag.realTime)}  ${diag.realSummary}"
+                        else "最近一次播报：还没有真实新单播报记录",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (diag.realText.isNotBlank()) {
+                        TextButton(onClick = { showRealDetail = !showRealDetail }) {
+                            Text(if (showRealDetail) "收起详情" else "展开最近一次播报详情")
+                        }
+                        if (showRealDetail) {
+                            SelectionContainer {
+                                Text(
+                                    diag.realText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+                    }
+                    if (diag.testText.isNotBlank() || diag.realText.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                val all = buildString {
+                                    append(versionText)
+                                    if (diag.testText.isNotBlank()) append("\n\n【试听】\n").append(diag.testText)
+                                    if (diag.realText.isNotBlank()) append("\n\n【最近一次播报】\n").append(diag.realText)
+                                }
+                                clipboard.setText(AnnotatedString(all.trim()))
+                                copied = true
+                            },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                        ) { Text(if (copied) "已复制" else "复制诊断") }
+                    }
                 }
             }
         }

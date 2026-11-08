@@ -18,6 +18,10 @@
     <package android:name="com.oppo.safe" />
     <package android:name="com.vivo.permissionmanager" />
     <package android:name="com.iqoo.secure" />
+    <!-- 0.3.1：targetSdk 30+ 必须声明，否则 App 看不到手机上的 TTS 引擎，TextToSpeech 初始化失败（没有任何播报）。 -->
+    <intent>
+      <action android:name="android.intent.action.TTS_SERVICE" />
+    </intent>
   </queries>
   <application android:label="小店AI助手" android:theme="@android:style/Theme.Material.Light.NoActionBar">
     <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">

@@ -9,6 +9,8 @@ package com.xiaodian.ai
 // 播报分两段（按 App 里保存的当前模式）：
 // - 老板：order_new →「有新单待收款，取餐号 X」；handoff_new →「有一条待人工消息」。
 // - 后厨：order_paid →「新单，取餐号 X，自取/配送」；不播 order_new 和待人工。
+// 0.3.1：设置页「试听播报」调用 testAnnounce()，和真实新单走同一条路（提示音 → speechQueue → Speaker）；
+// 每次播报的诊断由 Speaker 写进 SharedPreferences。播报协程里的异常不再让它悄悄退出。
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -53,7 +55,7 @@ class OrderAlertService : Service() {
     private var announcedLoaded = false
 
     /** 待播报的句子，单独一个协程按顺序播，不阻塞 SSE 读取。 */
-    private val speechQueue = Channel<List<String>>(Channel.UNLIMITED)
+    private val speechQueue = Channel<SpeechJob>(Channel.UNLIMITED)
     /** SSE 事件按到达顺序逐个处理，不阻塞读流。 */
     private val eventQueue = Channel<SseEvent>(Channel.UNLIMITED)
     private var eventJob: Job? = null
@@ -74,14 +76,11 @@ class OrderAlertService : Service() {
         ServiceCompat.startForeground(this, ONGOING_ID, buildOngoing(), type)
         speaker = Speaker(applicationContext)
         speaker.init()
+        running = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (speakJob?.isActive != true) {
-            speakJob = scope.launch {
-                for (batch in speechQueue) speaker.speakAll(batch)
-            }
-        }
+        ensureSpeakJob()
         if (eventJob?.isActive != true) {
             eventJob = scope.launch {
                 for (ev in eventQueue) {
@@ -94,7 +93,27 @@ class OrderAlertService : Service() {
         return START_STICKY
     }
 
+    /** 播报协程：一批一批按顺序播。没在运行就启动（onStartCommand 和每次 announce 都会检查）。 */
+    @Synchronized
+    private fun ensureSpeakJob() {
+        if (speakJob?.isActive == true) return
+        speakJob = scope.launch {
+            for (job in speechQueue) {
+                // 0.3.0 这里没有 try：speakAll 抛一次异常，播报协程就退出，之后的新单都不再播报。
+                try {
+                    speaker.speakAll(job.texts, job.report, forceHealth = job.report.isTest)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    job.report.outcomes += "播报出错 ${e.javaClass.simpleName}: ${e.message ?: ""}"
+                    SpeechDiagStore.save(applicationContext, job.report)
+                }
+            }
+        }
+    }
+
     override fun onDestroy() {
+        if (running === this) running = null
         stopping = true
         AppEvents.setSseConnected(false)
         try { sseCall?.cancel() } catch (_: Exception) {}
@@ -307,13 +326,27 @@ class OrderAlertService : Service() {
 
     // ---------- 通知 / 声音 / 播报 ----------
 
-    private suspend fun announce(texts: List<String>) {
+    private suspend fun announce(texts: List<String>, test: Boolean = false) {
         if (texts.isEmpty()) return
-        playTone()
+        val report = SpeechReport(if (test) "试听（后台服务内）" else "新单", isTest = test)
+        playTone(applicationContext)
         if (ApiClient.settings.ttsEnabled) {
             delay(1200) // 等提示音响完再播报
-            speechQueue.trySend(texts)
+            ensureSpeakJob()
+            val sent = speechQueue.trySend(SpeechJob(texts, report))
+            if (!sent.isSuccess) {
+                report.outcomes += "没有播报：播报队列已关闭（服务正在停止）"
+                saveSkipped(applicationContext, report)
+            }
+        } else {
+            report.outcomes += "没有播报：语音播报开关关闭（只响了提示音）"
+            saveSkipped(applicationContext, report)
         }
+    }
+
+    /** 设置页「试听播报」：和真实新单完全相同的路径。 */
+    fun testAnnounce() {
+        scope.launch { announce(listOf(TEST_TEXT), test = true) }
     }
 
     private fun createChannels() {
@@ -368,15 +401,52 @@ class OrderAlertService : Service() {
         }
     }
 
-    private fun playTone() {
-        try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            RingtoneManager.getRingtone(applicationContext, uri)?.play()
-        } catch (_: Exception) {
-        }
-    }
+    /** 一批要播的句子和它的诊断。 */
+    class SpeechJob(val texts: List<String>, val report: SpeechReport)
 
     companion object {
+        const val TEST_TEXT = "有新单待收款，取餐号 A1"
+
+        /** 正在运行的服务实例（同一进程内），设置页试听用。 */
+        @Volatile var running: OrderAlertService? = null
+            private set
+
+        fun playTone(context: Context) {
+            try {
+                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                RingtoneManager.getRingtone(context.applicationContext, uri)?.play()
+            } catch (_: Exception) {
+            }
+        }
+
+        /** 没有进入 Speaker 的播报（开关关闭等）也记一份诊断。 */
+        fun saveSkipped(context: Context, report: SpeechReport) {
+            val s = ApiClient.settings
+            report.ttsSwitch = if (s.ttsEnabled) "开" else "关"
+            report.serverTtsSwitch = if (s.serverTtsEnabled) "开" else "关"
+            SpeechDiagStore.fillSystemState(context, report)
+            SpeechDiagStore.save(context, report)
+        }
+
+        /** 服务没在运行时，界面里直接用 Speaker 试听（提示音 → 等 1.2 秒 → 播报）。在主线程协程里调用。 */
+        suspend fun testInForeground(context: Context) {
+            val report = SpeechReport("试听（服务未运行，界面内播放）", isTest = true)
+            playTone(context)
+            if (!ApiClient.settings.ttsEnabled) {
+                report.outcomes += "没有播报：语音播报开关关闭（只响了提示音）"
+                saveSkipped(context, report)
+                return
+            }
+            delay(1200)
+            val sp = Speaker(context.applicationContext)
+            sp.init()
+            try {
+                sp.speakAll(listOf(TEST_TEXT), report, forceHealth = true)
+            } finally {
+                sp.shutdown()
+            }
+        }
+
         private const val CH_ONGOING = "xd_ongoing"
         private const val CH_ALERTS = "xd_alerts_v1"
         private const val ONGOING_ID = 1
