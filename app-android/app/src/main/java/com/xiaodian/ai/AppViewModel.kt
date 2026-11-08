@@ -24,6 +24,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val settings: AppSettings = ApiClient.settings
 
+    /** 登录状态；null = 未登录，显示登录页。 */
+    val session: StateFlow<Session?> = ApiClient.session
+    /** 被动退出（401）的原因，显示在登录页。 */
+    val logoutReason: StateFlow<String> = ApiClient.logoutReason
+
+    private val _loginBusy = MutableStateFlow(false)
+    val loginBusy: StateFlow<Boolean> = _loginBusy.asStateFlow()
+
+    private val _loginError = MutableStateFlow("")
+    val loginError: StateFlow<String> = _loginError.asStateFlow()
+
     private val _mode = MutableStateFlow(settings.mode)
     val mode: StateFlow<AppMode> = _mode.asStateFlow()
 
@@ -64,6 +75,56 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var autoJob: Job? = null
 
     fun consumeMessage() { _message.value = "" }
+
+    // ---------- 登录 ----------
+
+    fun login(serverUrl: String, username: String, password: String) {
+        if (serverUrl.isBlank()) { _loginError.value = "请填写服务器地址"; return }
+        if (username.isBlank() || password.isEmpty()) { _loginError.value = "请填写用户名和密码"; return }
+        if (_loginBusy.value) return
+        _loginBusy.value = true
+        _loginError.value = ""
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { ApiClient.login(serverUrl, username.trim(), password) }
+                OrderAlertService.sync(getApplication())
+                refreshAllInternal()
+            } catch (e: Exception) {
+                _loginError.value = e.message ?: "登录失败"
+            } finally {
+                _loginBusy.value = false
+            }
+        }
+    }
+
+    fun clearLoginError() { _loginError.value = "" }
+
+    fun logout() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { ApiClient.logout() }
+            clearData()
+            OrderAlertService.sync(getApplication())
+        }
+    }
+
+    /** 启动时校验一次 token，顺便刷新用户名和有效期。 */
+    fun checkSession() {
+        if (!ApiClient.isLoggedIn()) return
+        viewModelScope.launch {
+            try { withContext(Dispatchers.IO) { ApiClient.refreshMe() } } catch (_: Exception) {}
+        }
+    }
+
+    /** 退出登录后清掉页面上的业务数据。 */
+    fun clearData() {
+        _orders.value = emptyList()
+        _handoffs.value = emptyList()
+        _menu.value = emptyList()
+        _drafts.value = emptyList()
+        _usage.value = null
+        _replyDrafts.value = emptyMap()
+        _loadError.value = ""
+    }
     private fun toast(text: String) { _message.value = text }
 
     fun setMode(m: AppMode) {
@@ -99,6 +160,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun refreshAllInternal() {
+        if (!ApiClient.isLoggedIn()) return
         _refreshing.value = true
         try {
             refreshLive()
@@ -110,6 +172,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 订单 + 待人工（+ 老板模式下的用量）。 */
     private suspend fun refreshLive() {
+        if (!ApiClient.isLoggedIn()) return
         val errors = mutableListOf<String>()
         try {
             val fresh = withContext(Dispatchers.IO) { OrderRepository.fetchOrders() }
@@ -132,16 +195,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 errors += (e.message ?: "拉取用量失败")
             }
         }
-        _loadError.value = errors.distinct().joinToString("\n")
+        _loadError.value = if (ApiClient.isLoggedIn()) errors.distinct().joinToString("\n") else ""
+        if (!ApiClient.isLoggedIn()) clearData()
     }
 
     private suspend fun refreshMenu() {
+        if (!ApiClient.isLoggedIn()) return
         try {
             val fresh = withContext(Dispatchers.IO) { MenuRepository.fetchMenu() }
                 .distinctBy { it.id }
             _menu.value = mergeById(_menu.value, fresh) { it.id }
         } catch (e: Exception) {
-            _loadError.value = e.message ?: "拉取菜单失败"
+            if (ApiClient.isLoggedIn()) _loadError.value = e.message ?: "拉取菜单失败"
         }
     }
 
@@ -160,6 +225,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 block()
+            } catch (e: UnauthorizedException) {
+                clearData() // 回到登录页，原因显示在登录页上
             } catch (e: Exception) {
                 toast(e.message ?: "操作失败")
             } finally {
@@ -242,6 +309,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- 菜单 ----------
 
     fun refreshMenuNow() {
+        if (!ApiClient.isLoggedIn()) return
         viewModelScope.launch {
             _refreshing.value = true
             try {

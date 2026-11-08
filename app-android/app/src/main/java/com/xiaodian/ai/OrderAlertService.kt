@@ -53,11 +53,22 @@ class OrderAlertService : Service() {
         if (loopJob?.isActive != true) {
             loopJob = scope.launch {
                 while (isActive) {
-                    if (!ApiClient.settings.alertsEnabled) {
+                    if (!ApiClient.settings.alertsEnabled || !ApiClient.isLoggedIn()) {
+                        // 别处（界面）先收到 401 被动退出时，也提醒一次。
+                        if (ApiClient.logoutReason.value.isNotBlank()) {
+                            notifyAlert("登录已过期，请重新登录", "打开小店AI助手重新登录后恢复新单提醒")
+                        }
                         stopSelf()
                         break
                     }
-                    pollOnce()
+                    try {
+                        pollOnce()
+                    } catch (e: UnauthorizedException) {
+                        // 登录过期：停止轮询，提醒重新登录。
+                        notifyAlert("登录已过期，请重新登录", "打开小店AI助手重新登录后恢复新单提醒")
+                        stopSelf()
+                        break
+                    }
                     delay(AppViewModel.POLL_MS)
                 }
             }
@@ -91,6 +102,8 @@ class OrderAlertService : Service() {
                 }
             }
             settings.saveSeenIds(KIND_ORDERS, ids)
+        } catch (e: UnauthorizedException) {
+            throw e
         } catch (_: Exception) {
             // 网络抖动：下一轮再拉，不打扰用户。
         }
@@ -106,6 +119,8 @@ class OrderAlertService : Service() {
                 }
             }
             settings.saveSeenIds(KIND_HANDOFFS, ids)
+        } catch (e: UnauthorizedException) {
+            throw e
         } catch (_: Exception) {
         }
 
@@ -210,11 +225,11 @@ class OrderAlertService : Service() {
         private const val KIND_ORDERS = "orders"
         private const val KIND_HANDOFFS = "handoffs"
 
-        /** 按设置开关启动或停止提醒服务。 */
+        /** 按设置开关和登录状态启动或停止提醒服务。 */
         fun sync(context: Context) {
             ApiClient.init(context.applicationContext)
             val intent = Intent(context, OrderAlertService::class.java)
-            if (ApiClient.settings.alertsEnabled) {
+            if (ApiClient.settings.alertsEnabled && ApiClient.isLoggedIn()) {
                 try {
                     ContextCompat.startForegroundService(context, intent)
                 } catch (_: Exception) {

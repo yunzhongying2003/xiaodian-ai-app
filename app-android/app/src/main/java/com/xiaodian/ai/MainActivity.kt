@@ -5,6 +5,7 @@ package com.xiaodian.ai
 // - 后厨：全屏看板。
 // - 老板：底部导航四页（待处理 / 订单 / 菜单 / 设置），顶部显示今日已完成金额。
 // 数据都在 AppViewModel；前台时每 8 秒自动刷新，后台由 OrderAlertService 提醒。
+// 没有登录 token（首次启动、退出登录、收到 401）时显示登录页。
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -67,6 +68,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ApiClient.init(applicationContext)
         vm = ViewModelProvider(this)[AppViewModel::class.java]
+        vm.checkSession()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -103,6 +105,27 @@ private enum class BossTab(val label: String) { HANDOFF("待处理"), ORDERS("�
 
 @Composable
 fun AppRoot(vm: AppViewModel, onAlertsChanged: () -> Unit, onExit: () -> Unit) {
+    val session by vm.session.collectAsState()
+    if (session == null) {
+        val loginBusy by vm.loginBusy.collectAsState()
+        val loginError by vm.loginError.collectAsState()
+        val logoutReason by vm.logoutReason.collectAsState()
+        LoginScreen(
+            initialServer = vm.settings.serverUrl,
+            initialUsername = vm.settings.username,
+            busy = loginBusy,
+            error = loginError,
+            notice = logoutReason,
+            onLogin = { server, user, pass -> vm.login(server, user, pass) },
+            onEdited = { vm.clearLoginError() },
+        )
+    } else {
+        LoggedInRoot(vm, onAlertsChanged, onExit)
+    }
+}
+
+@Composable
+private fun LoggedInRoot(vm: AppViewModel, onAlertsChanged: () -> Unit, onExit: () -> Unit) {
     val mode by vm.mode.collectAsState()
     val message by vm.message.collectAsState()
     val snackbar = remember { SnackbarHostState() }
@@ -195,6 +218,7 @@ private fun BossRoot(
     val busy by vm.busy.collectAsState()
     val loadError by vm.loadError.collectAsState()
     val refreshing by vm.refreshing.collectAsState()
+    val session by vm.session.collectAsState()
     var tabName by rememberSaveable { mutableStateOf(BossTab.HANDOFF.name) }
     val tab = BossTab.valueOf(tabName)
     val pendingPay = orders.count { it.status == "pending_payment" }
@@ -273,9 +297,10 @@ private fun BossRoot(
             )
             BossTab.SETTINGS -> SettingsPage(
                 settings = vm.settings,
+                session = session,
                 onSwitchToKitchen = { vm.setMode(AppMode.KITCHEN) },
                 onAlertsChanged = onAlertsChanged,
-                onServerChanged = { vm.refreshAll(); vm.refreshMenuNow() },
+                onLogout = { vm.logout() },
                 onExit = onExit,
                 modifier = m,
             )
