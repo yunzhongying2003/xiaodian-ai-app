@@ -37,7 +37,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 
+// 和后端 v3.3 shop_profile.validate 一致：出餐时长 1–600 分钟；文字长度上限见 MaxLen。
 private const val MAX_PREP_MINUTES = 600
+private object MaxLen {
+    const val SHOP_NAME = 100
+    const val HOURS = 300
+    const val ADDRESS = 300
+    const val DELIVERY = 500
+    const val NOTICE = 1000
+}
 
 @Composable
 fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = Modifier) {
@@ -75,8 +83,8 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
     fun edited(): ShopProfile? {
         val t = prep.trim()
         val minutes = if (t.isEmpty()) null else t.toIntOrNull()
-        if (t.isNotEmpty() && (minutes == null || minutes < 0 || minutes > MAX_PREP_MINUTES)) {
-            formError = "平均出餐时长请填 0–$MAX_PREP_MINUTES 之间的整数（分钟），不填就留空"
+        if (t.isNotEmpty() && (minutes == null || minutes < 1 || minutes > MAX_PREP_MINUTES)) {
+            formError = "平均出餐时长请填 1–$MAX_PREP_MINUTES 之间的整数（分钟），不填就留空"
             return null
         }
         formError = ""
@@ -155,14 +163,14 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
                         ProfileField(
                             label = "店名",
                             value = shopName,
-                            onChange = { shopName = it },
+                            onChange = { shopName = it.take(MaxLen.SHOP_NAME) },
                             hint = "客服自我介绍、顾客问「你们是哪家店」时用。",
                             enabled = canEdit,
                         )
                         ProfileField(
                             label = "营业时间",
                             value = hours,
-                            onChange = { hours = it },
+                            onChange = { hours = it.take(MaxLen.HOURS) },
                             hint = "客服回答顾客「几点开门」「今天开不开」时用；不填则转给您回答。",
                             placeholder = "例如：每天 10:00–21:00，周一休息",
                             multiline = true,
@@ -171,14 +179,14 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
                         ProfileField(
                             label = "地址",
                             value = address,
-                            onChange = { address = it },
+                            onChange = { address = it.take(MaxLen.ADDRESS) },
                             hint = "顾客问「店在哪」「到店自取怎么走」时用；不填则转给您回答。",
                             enabled = canEdit,
                         )
                         ProfileField(
                             label = "配送范围",
                             value = delivery,
-                            onChange = { delivery = it },
+                            onChange = { delivery = it.take(MaxLen.DELIVERY) },
                             hint = "顾客问「能不能送到某某地方」「送不送」时用；不填则转给您回答。",
                             placeholder = "例如：3 公里内免费送；XX 小区、XX 大厦可送",
                             multiline = true,
@@ -196,7 +204,7 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
                         ProfileField(
                             label = "店铺公告 / 补充说明",
                             value = notice,
-                            onChange = { notice = it },
+                            onChange = { notice = it.take(MaxLen.NOTICE) },
                             hint = "临时休息、节假日安排、优惠活动、忌口说明等；顾客问到相关问题时客服会告诉对方。",
                             multiline = true,
                             enabled = canEdit,
