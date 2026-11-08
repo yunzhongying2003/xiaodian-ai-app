@@ -97,27 +97,42 @@ jobs:
           echo "keystore=$ks" >> "$GITHUB_OUTPUT"
 
       # 2026-11-08 0.3.1：gradle-build-action 下载 Gradle 发行版连续返回 504（runner 的 cache 服务也报 400），
-      # 和代码无关。改为自己下载 Gradle 8.7：先从 GitHub 上的官方镜像（gradle/gradle-distributions）取，
-      # 失败再试 services.gradle.org，每个地址重试 3 次，并校验官方 SHA-256。不再用 Actions 缓存。
+      # 随后 runner 上直接 curl services.gradle.org 和 GitHub 镜像（gradle/gradle-distributions）也都是 504，
+      # 和代码无关。现在按顺序试三个来源，拿到就停：
+      #   1. Docker Hub 官方镜像 gradle:8.7.0-jdk17，把里面的 /opt/gradle 拷出来（不走 Gradle 的下载站）；
+      #   2. GitHub 镜像；3. services.gradle.org（zip 校验官方 SHA-256）。
+      # 最后检查 gradle --version 必须是 8.7（runner 自带的是 Gradle 9，AGP 8.5 不能用）。不再用 Actions 缓存。
       - name: Install Gradle 8.7
         env:
           GRADLE_SHA256: 544c35d6bd849ae8a5ed0bcea39ba677dc40f49df7d1835561582da2009b961d
         run: |
-          zip="$RUNNER_TEMP/gradle-8.7-bin.zip"
+          dest="$RUNNER_TEMP/gradle-8.7"
           ok=""
-          for url in \
-            https://github.com/gradle/gradle-distributions/releases/download/v8.7.0/gradle-8.7-bin.zip \
-            https://services.gradle.org/distributions/gradle-8.7-bin.zip; do
-            for i in 1 2 3; do
-              if curl -fsSL --retry 2 --retry-delay 5 -o "$zip" "$url" \
-                 && echo "$GRADLE_SHA256  $zip" | sha256sum -c - ; then ok=1; break; fi
-              echo "下载失败（$url 第 $i 次），10 秒后重试"; sleep 10
-            done
-            [ -n "$ok" ] && break
+          for i in 1 2; do
+            if docker pull -q gradle:8.7.0-jdk17; then
+              cid=$(docker create gradle:8.7.0-jdk17)
+              docker cp "$cid:/opt/gradle" "$dest" && ok=1
+              docker rm "$cid" >/dev/null
+              if [ -n "$ok" ]; then echo "Gradle 来自 Docker Hub 镜像"; break; fi
+            fi
+            echo "Docker Hub 第 $i 次失败，10 秒后重试"; sleep 10
           done
-          if [ -z "$ok" ]; then echo "::error::Gradle 8.7 下载失败"; exit 1; fi
-          unzip -q "$zip" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/gradle-8.7/bin" >> "$GITHUB_PATH"
+          if [ -z "$ok" ]; then
+            zip="$RUNNER_TEMP/gradle-8.7-bin.zip"
+            for url in \
+              https://github.com/gradle/gradle-distributions/releases/download/v8.7.0/gradle-8.7-bin.zip \
+              https://services.gradle.org/distributions/gradle-8.7-bin.zip; do
+              if curl -fsSL --retry 3 --retry-delay 10 -o "$zip" "$url" \
+                 && echo "$GRADLE_SHA256  $zip" | sha256sum -c - ; then
+                unzip -q "$zip" -d "$RUNNER_TEMP" && ok=1 && echo "Gradle 来自 $url" && break
+              fi
+              echo "下载失败：$url"
+            done
+          fi
+          if [ -z "$ok" ]; then echo "::error::Gradle 8.7 三个来源都拿不到"; exit 1; fi
+          "$dest/bin/gradle" --version | tee gv.txt
+          grep -q "^Gradle 8.7" gv.txt || { echo "::error::Gradle 版本不是 8.7"; exit 1; }
+          echo "$dest/bin" >> "$GITHUB_PATH"
 
       - name: Build release APK (signed)
         if: steps.sign.outputs.mode == 'release' || steps.sign.outputs.mode == 'selftest'
