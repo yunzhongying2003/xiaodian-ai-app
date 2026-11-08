@@ -10,6 +10,8 @@ name: Android APK (debug)
 # 被 cmdline-tools 取代），导致整个 run 在 Set up Android SDK 一步失败。
 # 改为直接用 runner 自带的 Android SDK（/usr/local/lib/android/sdk），
 # 不再用 setup-android 这个 action，只用其自带的 sdkmanager 装需要的包。
+#
+# versionCode = GITHUB_RUN_NUMBER（通过 -PappVersionCode 传给 Gradle），versionName 见 app/build.gradle.kts。
 on:
   push:
     branches: [main]
@@ -46,13 +48,15 @@ jobs:
         with:
           gradle-version: "8.7"
           build-root-directory: app-android
-          arguments: :app:assembleDebug --stacktrace
+          arguments: :app:assembleDebug --stacktrace -PappVersionCode=${{ github.run_number }}
 
       - name: Publish APK to Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: 小店AI助手 Debug build #${{ github.run_number }}
+          # 让 tag 指向本次编译的提交（手动对分支触发时也一样），而不是默认分支
+          target_commitish: ${{ github.sha }}
+          name: 小店AI助手 Debug build #${{ github.run_number }} (${{ github.ref_name }})
           prerelease: true
           generate_release_notes: true
           files: app-android/app/build/outputs/apk/debug/app-debug.apk
