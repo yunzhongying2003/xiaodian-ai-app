@@ -234,6 +234,8 @@ private fun BossRoot(
     val session by vm.session.collectAsState()
     var tabName by rememberSaveable { mutableStateOf(BossTab.HANDOFF.name) }
     val tab = BossTab.valueOf(tabName)
+    // 设置页里的子页面「店铺资料」；切走设置标签就关掉。
+    var shopProfileOpen by rememberSaveable { mutableStateOf(false) }
     val pendingPay = orders.count { it.status == "pending_payment" }
 
     LaunchedEffect(Unit) { vm.refreshMenuNow() }
@@ -264,7 +266,10 @@ private fun BossRoot(
                 for (t in BossTab.values()) {
                     NavigationBarItem(
                         selected = t == tab,
-                        onClick = { tabName = t.name },
+                        onClick = {
+                            tabName = t.name
+                            if (t != BossTab.SETTINGS) shopProfileOpen = false
+                        },
                         label = { Text(t.label) },
                         icon = {
                             val count = when (t) {
@@ -316,10 +321,13 @@ private fun BossRoot(
                 vm = vm,
                 modifier = m,
             )
-            BossTab.SETTINGS -> SettingsPage(
+            BossTab.SETTINGS -> if (shopProfileOpen) {
+                ShopProfilePage(vm = vm, onBack = { shopProfileOpen = false }, modifier = m)
+            } else SettingsPage(
                 settings = vm.settings,
                 session = session,
                 onSwitchToKitchen = { vm.setMode(AppMode.KITCHEN) },
+                onOpenShopProfile = { shopProfileOpen = true },
                 onAlertsChanged = onAlertsChanged,
                 onLogout = { vm.logout() },
                 onExit = onExit,

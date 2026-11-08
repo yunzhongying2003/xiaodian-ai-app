@@ -5,6 +5,7 @@ package com.xiaodian.ai
 // 「使用服务器人声」（默认开）；「保持后台提醒」（电池优化白名单）和「自启动设置」（国产系统）。
 // 0.3.1「播报诊断」：试听播报按钮（和真实新单同一条路径），下方显示完整诊断，可选中/复制；
 // 另显示「最近一次播报：时间 + 结果摘要」（真实新单播报后由 Speaker 写入）。
+// 0.3.2「店铺资料」入口：点进去是 ShopProfilePage 表单（营业时间、地址等，给 AI 客服回答顾客用）。
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -52,6 +53,7 @@ fun SettingsPage(
     settings: AppSettings,
     session: Session?,
     onSwitchToKitchen: () -> Unit,
+    onOpenShopProfile: () -> Unit,
     onAlertsChanged: () -> Unit,
     onLogout: () -> Unit,
     onExit: () -> Unit,
@@ -113,6 +115,22 @@ fun SettingsPage(
                         onClick = { confirmLogout = true },
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) { Text("退出登录", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+        item(key = "shop_profile") {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("店铺资料", style = MaterialTheme.typography.titleMedium)
+                    Button(
+                        onClick = onOpenShopProfile,
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) { Text("店铺资料") }
+                    Text(
+                        "店名、营业时间、地址、配送范围、出餐时长、店铺公告。AI 客服回答顾客时会用到。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

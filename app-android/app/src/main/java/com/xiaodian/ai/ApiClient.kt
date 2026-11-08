@@ -149,6 +149,18 @@ object ApiClient {
         }
     }
 
+    /** PUT JSON：和 postJson 一样走 builder()（Bearer）和 fail()（401 登出、403 权限提示）。 */
+    fun putJson(path: String, json: JSONObject, what: String): JSONObject {
+        val req = builder(path)
+            .put(json.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) throw fail(what, resp.code, body)
+            return parse(body)
+        }
+    }
+
     fun postBody(path: String, requestBody: RequestBody, what: String): JSONObject {
         val req = builder(path).post(requestBody).build()
         http.newCall(req).execute().use { resp ->

@@ -144,8 +144,72 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _stats.value = null
         _replyDrafts.value = emptyMap()
         _loadError.value = ""
+        _shopProfile.value = null
+        _shopProfileError.value = ""
     }
     private fun toast(text: String) { _message.value = text }
+
+    // ---------- 店铺资料（0.3.2） ----------
+
+    private val _shopProfile = MutableStateFlow<ShopProfile?>(null)
+    /** 服务器上的店铺资料；null = 还没读到。 */
+    val shopProfile: StateFlow<ShopProfile?> = _shopProfile.asStateFlow()
+
+    private val _shopProfileLoading = MutableStateFlow(false)
+    val shopProfileLoading: StateFlow<Boolean> = _shopProfileLoading.asStateFlow()
+
+    /** 读取失败的原因（显示在表单页顶部）；404 时是「后端版本过旧，请先部署 v3.3」。 */
+    private val _shopProfileError = MutableStateFlow("")
+    val shopProfileError: StateFlow<String> = _shopProfileError.asStateFlow()
+
+    private val _shopProfileSaving = MutableStateFlow(false)
+    val shopProfileSaving: StateFlow<Boolean> = _shopProfileSaving.asStateFlow()
+
+    fun loadShopProfile() {
+        if (_shopProfileLoading.value) return
+        _shopProfileLoading.value = true
+        _shopProfileError.value = ""
+        viewModelScope.launch {
+            try {
+                _shopProfile.value = withContext(Dispatchers.IO) { ShopProfileRepository.fetch() }
+            } catch (e: UnauthorizedException) {
+                clearData()
+            } catch (e: Exception) {
+                _shopProfileError.value = errorText(e, "读取店铺资料失败")
+            } finally {
+                _shopProfileLoading.value = false
+            }
+        }
+    }
+
+    /** 保存；只提交改动的字段。成功或失败都弹提示，成功后回调 [onSaved]。 */
+    fun saveShopProfile(edited: ShopProfile, onSaved: () -> Unit = {}) {
+        val old = _shopProfile.value ?: run { toast("店铺资料还没读到，不能保存"); return }
+        if (_shopProfileSaving.value) return
+        if (ShopProfileRepository.diff(old, edited).length() == 0) { toast("没有改动"); return }
+        _shopProfileSaving.value = true
+        viewModelScope.launch {
+            try {
+                _shopProfile.value = withContext(Dispatchers.IO) { ShopProfileRepository.save(old, edited) }
+                toast("店铺资料已保存")
+                onSaved()
+            } catch (e: UnauthorizedException) {
+                clearData()
+            } catch (e: Exception) {
+                toast(errorText(e, "保存店铺资料失败"))
+            } finally {
+                _shopProfileSaving.value = false
+            }
+        }
+    }
+
+    private fun errorText(e: Exception, what: String): String = when (e) {
+        is ShopProfileUnsupportedException -> ShopProfileRepository.OLD_BACKEND
+        is ApiException -> e.message ?: what
+        is java.io.IOException -> "${what}：连不上服务器（${e.message ?: "网络错误"}）"
+        is org.json.JSONException -> "${what}：服务器返回的内容不是 JSON"
+        else -> e.message?.let { "${what}：$it" } ?: what
+    }
 
     fun setMode(m: AppMode) {
         settings.mode = m

@@ -6,7 +6,7 @@
 ## 编译与下载
 - 编译走 GitHub Actions：仓库根目录 `.github/workflows/android.yml`。
 - 产物**发布到 GitHub Releases**（tag `build-N`），文件名 `xiaodian-<versionName>-<N>.apk`。不放 Actions Artifacts。
-- `versionCode` = CI 的 `GITHUB_RUN_NUMBER`（通过 `-PappVersionCode` 传入，本地默认 1）；`versionName` = 0.3.1。
+- `versionCode` = CI 的 `GITHUB_RUN_NUMBER`（通过 `-PappVersionCode` 传入，本地默认 1）；`versionName` = 0.3.2。
 
 ### 固定签名
 - 仓库 Settings → Secrets and variables → Actions 配好 4 个 secret 后，CI 编 `assembleRelease` 并用正式 key 签名：
@@ -42,7 +42,9 @@
 | `HandoffScreen.kt` | 待处理：媒体下载后查看 / 播放，回复、发图、标记已处理。 |
 | `MenuScreen.kt` | 菜单：用量卡片、添加、AI 草稿批量加入、改价 / 删除（带确认）、在售开关。 |
 | `LoginScreen.kt` | 登录页：服务器地址、用户名、密码。 |
-| `SettingsScreen.kt` | 设置：当前用户、登录有效期、退出登录、提醒 / 播报 / 服务器人声开关、保持后台提醒、自启动设置、切换模式、退出 App。 |
+| `ShopProfileApi.kt` | 店铺资料接口：`GET /app/shop-profile`、`PUT /app/shop-profile`（只传改动字段，Bearer）；404 视为后端过旧（需 v3.3）。 |
+| `ShopProfileScreen.kt` | 店铺资料表单：店名、营业时间、地址、配送范围、平均出餐时长（分钟）、店铺公告，每项下方说明用途；未保存返回时确认。 |
+| `SettingsScreen.kt` | 设置：店铺资料入口、当前用户、登录有效期、退出登录、提醒 / 播报 / 服务器人声开关、保持后台提醒、自启动设置、切换模式、退出 App。 |
 | `AppLogic.kt` | 早期的纯逻辑类（PinGate / ModePolicy / OfflineQueue），目前界面未使用。 |
 
 ## 模式
@@ -70,6 +72,7 @@
   每次真实播报的诊断也写进 SharedPreferences，设置页显示「最近一次播报：时间 + 结果摘要」。
 - 需要的权限：`POST_NOTIFICATIONS`（Android 13+ 运行时申请）、`FOREGROUND_SERVICE_DATA_SYNC`、
   `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
+- 店铺资料（0.3.2）：设置 →「店铺资料」。读 `GET /app/shop-profile`，保存走 `PUT /app/shop-profile`，只提交改过的字段（清空文字传 `""`，清空出餐时长传 `null`），成功/失败都有提示；接口 404 时提示「后端版本过旧，请先部署 v3.3」。
 - 设置页「保持后台提醒」把 App 加入电池白名单；「自启动设置」跳小米 / 华为 / OPPO / vivo 的自启动页面（失败打开应用详情）。
 
 ## 只使用的后端接口
