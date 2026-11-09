@@ -5,6 +5,7 @@ package com.xiaodian.ai
 // 保存只提交改过的字段；成功/失败用 Snackbar 提示，失败原因也显示在按钮上方。
 // 后端没有 /app/shop-profile（404）时显示「后端版本过旧，请先部署 v3.3」。
 // 有未保存的改动时，返回会先确认。
+// 0.3.3：加「客服人设」卡片：显示实际生效的人设，可改，可「恢复默认」；和默认一样时保存为 ""。
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -45,6 +46,7 @@ private object MaxLen {
     const val ADDRESS = 300
     const val DELIVERY = 500
     const val NOTICE = 1000
+    const val PERSONA = 1000
 }
 
 @Composable
@@ -64,6 +66,7 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
     var delivery by rememberSaveable { mutableStateOf("") }
     var prep by rememberSaveable { mutableStateOf("") }
     var notice by rememberSaveable { mutableStateOf("") }
+    var persona by rememberSaveable { mutableStateOf("") }
     var formError by rememberSaveable { mutableStateOf("") }
     var confirmLeave by rememberSaveable { mutableStateOf(false) }
 
@@ -77,6 +80,7 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
             delivery = p.deliveryRange
             prep = p.prepMinutes?.toString() ?: ""
             notice = p.notice
+            persona = p.effectivePersona
         }
     }
 
@@ -95,6 +99,8 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
             deliveryRange = delivery.trim(),
             prepMinutes = minutes,
             notice = notice.trim(),
+            persona = personaToSave(persona, p?.personaDefault),
+            personaDefault = p?.personaDefault,
         )
     }
 
@@ -102,7 +108,8 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
         val t = prep.trim()
         shopName.trim() != p.shopName || hours.trim() != p.hours || address.trim() != p.address ||
             delivery.trim() != p.deliveryRange || notice.trim() != p.notice ||
-            t != (p.prepMinutes?.toString() ?: "")
+            t != (p.prepMinutes?.toString() ?: "") ||
+            (p.personaDefault != null && persona.trim() != p.effectivePersona.trim())
     }
 
     val back: () -> Unit = { if (dirty && !saving) confirmLeave = true else onBack() }
@@ -212,6 +219,43 @@ fun ShopProfilePage(vm: AppViewModel, onBack: () -> Unit, modifier: Modifier = M
                     }
                 }
             }
+            item(key = "persona") {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("客服人设", style = MaterialTheme.typography.titleMedium)
+                        val def = p.personaDefault
+                        if (def == null) {
+                            Text(
+                                "需要后端 v3.3.2 及以上才能设置人设。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            ProfileField(
+                                label = "人设",
+                                value = persona,
+                                onChange = { persona = it.take(MaxLen.PERSONA) },
+                                hint = "决定 AI 打招呼、闲聊、推荐时的说话风格。不编造、不承诺、不知道就问老板这几条规则始终有效，人设改不掉。下单确认、进度通知等固定文案不受影响。",
+                                multiline = true,
+                                maxLines = 14,
+                                enabled = canEdit,
+                            )
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (persona.trim() == def.trim()) "当前是默认人设" else "已自定义（${persona.length}/${MaxLen.PERSONA} 字）",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(
+                                    onClick = { persona = def },
+                                    enabled = canEdit && persona.trim() != def.trim(),
+                                ) { Text("恢复默认") }
+                            }
+                        }
+                    }
+                }
+            }
             item(key = "save") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (formError.isNotBlank()) {
@@ -248,6 +292,7 @@ private fun ProfileField(
     placeholder: String = "",
     multiline: Boolean = false,
     number: Boolean = false,
+    maxLines: Int = 6,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         OutlinedTextField(
@@ -257,7 +302,7 @@ private fun ProfileField(
             placeholder = { if (placeholder.isNotBlank()) Text(placeholder) },
             singleLine = !multiline,
             minLines = if (multiline) 2 else 1,
-            maxLines = if (multiline) 6 else 1,
+            maxLines = if (multiline) maxLines else 1,
             enabled = enabled,
             keyboardOptions = if (number) KeyboardOptions(keyboardType = KeyboardType.Number) else KeyboardOptions.Default,
             modifier = Modifier.fillMaxWidth(),
@@ -269,4 +314,11 @@ private fun ProfileField(
             modifier = Modifier.padding(horizontal = 4.dp),
         )
     }
+}
+
+/** 和默认人设一样（或为空）时存 ""，以后默认人设更新也能跟上。 */
+internal fun personaToSave(text: String, default: String?): String {
+    val t = text.trim()
+    if (default == null) return ""
+    return if (t.isEmpty() || t == default.trim()) "" else t
 }

@@ -6,6 +6,9 @@ package com.xiaodian.ai
 //   PUT /app/shop-profile（Bearer，和其他写接口同一个 AuthProvider / 同一套 401、403 处理）
 //     请求体只放改动过的字段，返回更新后的完整资料。
 //     清空文字字段传 ""，清空出餐时长传 null。
+// 0.3.3：加「客服人设」persona（后端 v3.3.2 起）。GET 还会返回 persona_default（默认人设全文）。
+//   persona 为 "" 表示用默认人设；App 里显示的是「实际生效的人设」，保存时如果内容和默认一样就传 ""。
+//   老后端（v3.3 / v3.3.1）不返回 persona_default，人设一栏显示「需要后端 v3.3.2」。
 // 老后端（v3.3 之前）没有这个接口，返回 404：提示「后端版本过旧，请先部署 v3.3」。
 import org.json.JSONObject
 
@@ -17,7 +20,14 @@ data class ShopProfile(
     /** 平均出餐时长（分钟）；null = 没填。 */
     val prepMinutes: Int? = null,
     val notice: String = "",
-)
+    /** 老板写的人设；"" = 用默认人设。 */
+    val persona: String = "",
+    /** 后端给的默认人设；null = 后端太旧，不支持人设。 */
+    val personaDefault: String? = null,
+) {
+    /** 实际生效的人设（空就是默认）。 */
+    val effectivePersona: String get() = persona.ifBlank { personaDefault ?: "" }
+}
 
 /** 后端没有 /app/shop-profile（404）。 */
 class ShopProfileUnsupportedException : Exception(ShopProfileRepository.OLD_BACKEND)
@@ -43,6 +53,7 @@ object ShopProfileRepository {
         if (old.deliveryRange != new.deliveryRange) o.put("delivery_range", new.deliveryRange)
         if (old.prepMinutes != new.prepMinutes) o.put("prep_minutes", new.prepMinutes ?: JSONObject.NULL)
         if (old.notice != new.notice) o.put("notice", new.notice)
+        if (new.personaDefault != null && old.persona != new.persona) o.put("persona", new.persona)
         return o
     }
 
@@ -53,6 +64,9 @@ object ShopProfileRepository {
         deliveryRange = str(o, "delivery_range"),
         prepMinutes = intOrNull(o, "prep_minutes"),
         notice = str(o, "notice"),
+        persona = str(o, "persona"),
+        personaDefault = if (!o.has("persona_default") || o.isNull("persona_default")) null
+            else o.optString("persona_default"),
     )
 
     /** null / 缺字段都当空串（optString 会把 JSON null 变成 "null"，这里避开）。 */

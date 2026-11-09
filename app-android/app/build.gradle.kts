@@ -18,7 +18,7 @@ android {
     defaultConfig {
         applicationId = "com.xiaodian.ai"; minSdk = 26; targetSdk = 34
         versionCode = appVersionCode
-        versionName = "0.3.2"
+        versionName = "0.3.3"
     }
     signingConfigs {
         if (signingStoreFile != null) {
